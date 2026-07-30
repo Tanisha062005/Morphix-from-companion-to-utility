@@ -1,0 +1,22 @@
+# ==============================================================================
+# Morphix Desktop Companion Robot - Python Dependencies
+# ==============================================================================
+
+# --- Audio Input & Continuous Recording ---
+sounddevice>=0.4.6        # Python interface for PortAudio (mic stream capture)
+numpy>=1.22.0             # Array operations (manipulating raw audio buffers)
+
+# --- Audio Playback & Sound Effects ---
+pygame>=2.1.0             # Playback of WAV audio assets (bark, wake sound)
+
+# --- Wake-Word Matching ---
+rapidfuzz>=3.0.0          # High-performance fuzzy string/token matching logic
+openwakeword>=0.5.1        # Modular offline wake-word detector
+
+# --- Wake-Word Runtime Inference Engines (For openWakeWord) ---
+# Install the runtime engine corresponding to your model format:
+tflite-runtime>=2.11.0    # Required for morphix.tflite model execution
+onnxruntime>=1.12.0       # Required for morphix.onnx model execution (optional fallback)
+
+# --- Speech-To-Text Transcription ---
+pywhispercpp>=0.1.0       # High-performance bindings for Whisper.cpp (tiny.en GGUF model)
