@@ -3,13 +3,11 @@ Morphix Desktop Companion Robot - Background Reminder Checker Service
 ======================================================================
 File: src/reminder/reminder_checker.py
 Description:
-    Runs a background service thread polling for due reminders every 10 seconds.
-    When a reminder trigger time arrives:
-      1. Plays assets/sounds/morphix_voice.wav (waits until playback completes).
-      2. Piper TTS speaks: "Tanisha, it's time to <reminder_text>."
-      3. Marks the reminder completed in persistent storage.
+    Runs a background service thread polling for due reminders.
+    Utilizes the NotificationManager layer to broadcast notifications.
 """
 
+from datetime import datetime
 import logging
 from pathlib import Path
 import sys
@@ -18,6 +16,7 @@ import time
 from typing import Optional
 
 from src.audio.sound_player import SoundPlayer
+from src.notification.notification_manager import NotificationManager, ConsoleNotificationSender
 from src.reminder.reminder_manager import ReminderManager
 from src.voice.text_to_speech import TextToSpeech
 
@@ -42,8 +41,9 @@ class ReminderChecker:
         reminder_manager: Optional[ReminderManager] = None,
         sound_player: Optional[SoundPlayer] = None,
         tts: Optional[TextToSpeech] = None,
-        check_interval: float = 10.0,
-        wake_sound_path: str = "assets/sounds/morphix_voice.wav"
+        check_interval: float = 2.0,  # default to checking every 2 seconds for responsiveness
+        wake_sound_path: str = "assets/sounds/morphix_voice.wav",
+        notification_manager: Optional[NotificationManager] = None
     ) -> None:
         """
         Initializes ReminderChecker background service.
@@ -51,14 +51,24 @@ class ReminderChecker:
         :param reminder_manager: ReminderManager instance.
         :param sound_player: SoundPlayer instance.
         :param tts: TextToSpeech instance.
-        :param check_interval: Polling frequency in seconds (default: 10.0s).
+        :param check_interval: Polling frequency in seconds (default: 2.0s).
         :param wake_sound_path: Sound effect file path to play on due reminder.
+        :param notification_manager: Optional custom NotificationManager.
         """
         self.reminder_manager: ReminderManager = reminder_manager or ReminderManager()
-        self.sound_player: SoundPlayer = sound_player or SoundPlayer()
-        self.tts: TextToSpeech = tts or TextToSpeech()
         self.check_interval: float = check_interval
         self.wake_sound_path: str = wake_sound_path
+
+        # If a custom NotificationManager is provided, use it
+        # Otherwise, instantiate a default wrapper with the SoundPlayer & TTS engines
+        if notification_manager:
+            self.notification_manager = notification_manager
+        else:
+            self.notification_manager = NotificationManager()
+            sp = sound_player or SoundPlayer()
+            tts_engine = tts or TextToSpeech()
+            console_sender = ConsoleNotificationSender(sp, tts_engine, wake_sound_path)
+            self.notification_manager.register_sender(console_sender)
 
         self._running: bool = False
         self._thread: Optional[threading.Thread] = None
@@ -86,30 +96,30 @@ class ReminderChecker:
         :return: Number of due reminders processed in this pass.
         """
         try:
-            due_list = self.reminder_manager.get_due_reminders()
+            # Query timezone-aware current local time
+            now = datetime.now(self.reminder_manager.tz)
+            due_list = self.reminder_manager.get_due_reminders(now)
             count = len(due_list)
 
             for rem in due_list:
                 rem_id = rem.get("id")
-                rem_text = rem.get("text", "do your task")
+                message = rem.get("message", "do your task")
+                trigger_time_str = rem.get("trigger_time", "")
 
-                logger.info("Triggering due reminder ID %s: '%s'", rem_id, rem_text)
+                logger.info("Triggering due reminder ID %s: '%s'", rem_id, message)
 
-                # 1. Play morphix_voice.wav (wait until playback completes)
+                # Format timestamps for readability
+                current_time_str = now.strftime('%Y-%m-%d %H:%M:%S')
                 try:
-                    self.sound_player.play_sound(self.wake_sound_path)
-                except Exception as ex:
-                    logger.error("Sound playback failed for reminder %s: %s", rem_id, str(ex))
+                    trig_dt = datetime.fromisoformat(trigger_time_str)
+                    formatted_trigger = trig_dt.strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    formatted_trigger = trigger_time_str
 
-                # 2. Piper TTS speaks message
-                spoken_message = f"Tanisha, it's time to {rem_text}."
-                logger.info("Speaking reminder notification: '%s'", spoken_message)
-                try:
-                    self.tts.speak(spoken_message)
-                except Exception as ex:
-                    logger.error("TTS speaking failed for reminder %s: %s", rem_id, str(ex))
+                # Notify channels in exact execution order
+                self.notification_manager.notify(message, formatted_trigger, current_time_str)
 
-                # 3. Mark reminder completed
+                # Mark completed in persistent storage
                 self.reminder_manager.mark_completed(rem_id)
 
             return count

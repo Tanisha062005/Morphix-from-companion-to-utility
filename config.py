@@ -41,6 +41,7 @@ class Config:
     STT_MODEL: str = os.getenv("MODEL", "tiny.en")
     WHISPER_MODELS_DIR: str = "models/whisper"
     WAKE_WORD_THRESHOLD: float = 82.0
+    ACTIVE_MODE_TIMEOUT: int = 300
 
     # Wake Word Pipeline Configuration
     WAKE_PHRASE: str = "hey morphix"
@@ -107,5 +108,7 @@ class Config:
     DEBUG_MODE: bool = True
     LOGGING_ENABLED: bool = True
     DEVELOPMENT_MODE: bool = False
+    DEBUG_AUDIO_PIPELINE: bool = True
+    COMMAND_QUEUE_WARMUP_TIMEOUT: float = 1.0
 
 

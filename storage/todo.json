@@ -1,1 +1,18 @@
-[]
+[
+    {
+        "id": "e2f30f72-2268-4d14-819e-d7482ed5b6af",
+        "task": "i did both in my do-do",
+        "created_at": "2026-08-01T20:20:20",
+        "completed": false,
+        "completed_at": null,
+        "updated_at": null
+    },
+    {
+        "id": "951beb20-0208-4d47-8e9d-2ef6cb114e05",
+        "task": "it to your in my don t do",
+        "created_at": "2026-08-01T21:20:42",
+        "completed": false,
+        "completed_at": null,
+        "updated_at": null
+    }
+]

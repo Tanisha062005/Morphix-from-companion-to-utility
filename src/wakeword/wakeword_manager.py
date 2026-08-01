@@ -97,6 +97,16 @@ class WakeWordManager:
 
         return self.engine.is_detected(audio_frame)
 
+    def detect(self, audio_frame: Optional[bytes] = None) -> bool:
+        """
+        Evaluates whether the wake word is detected by the active engine.
+        Alias for is_detected.
+
+        :param audio_frame: Optional raw PCM audio bytes or chunk.
+        :return: True if wake word is detected, False otherwise.
+        """
+        return self.is_detected(audio_frame)
+
     def get_engine_name(self) -> str:
         """
         Returns the name of the currently active wake word engine backend.

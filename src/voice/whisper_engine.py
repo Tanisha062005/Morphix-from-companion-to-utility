@@ -34,20 +34,41 @@ if not logger.handlers:
 @contextmanager
 def suppress_stdout_stderr():
     """A context manager that redirects stdout and stderr to devnull to suppress native C++ logging."""
-    devnull = None
+    # Flush Python stdout/stderr before swapping descriptors
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+    devnull_fd = None
     saved_stdout_fd = None
     saved_stderr_fd = None
+    null_file = None
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+
     try:
-        devnull = os.open(os.devnull, os.O_RDWR)
+        null_file = open(os.devnull, "w", encoding="utf-8")
+        sys.stdout = null_file
+        sys.stderr = null_file
+
+        devnull_fd = os.open(os.devnull, os.O_RDWR)
         saved_stdout_fd = os.dup(1)
         saved_stderr_fd = os.dup(2)
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+
         yield
-    except Exception:
-        yield
+
     finally:
-        if devnull is not None:
+        try:
+            if null_file:
+                null_file.flush()
+        except Exception:
+            pass
+
+        if devnull_fd is not None:
             try:
                 if saved_stdout_fd is not None:
                     os.dup2(saved_stdout_fd, 1)
@@ -55,9 +76,23 @@ def suppress_stdout_stderr():
                 if saved_stderr_fd is not None:
                     os.dup2(saved_stderr_fd, 2)
                     os.close(saved_stderr_fd)
-                os.close(devnull)
+                os.close(devnull_fd)
             except Exception:
                 pass
+
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        if null_file:
+            try:
+                null_file.close()
+            except Exception:
+                pass
+
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 class WhisperEngine(SpeechEngine):
@@ -102,7 +137,12 @@ class WhisperEngine(SpeechEngine):
             start_time = time.time()
 
             from pywhispercpp.model import Model
-            WhisperEngine._model = Model(model=self.model_name, models_dir=self.models_dir)
+            WhisperEngine._model = Model(
+                model=self.model_name,
+                models_dir=self.models_dir,
+                print_realtime=False,
+                print_progress=False
+            )
             WhisperEngine._loaded_model_name = self.model_name
 
             duration = time.time() - start_time
@@ -113,6 +153,25 @@ class WhisperEngine(SpeechEngine):
         except Exception as e:
             logger.error("Failed to load Whisper.cpp model: %s", str(e))
             return False
+
+    def _get_wav_duration(self, audio_source: Union[str, bytes]) -> float:
+        """Helper to compute duration of WAV audio source in seconds."""
+        import io
+        import wave
+        try:
+            if isinstance(audio_source, bytes):
+                wav_file = io.BytesIO(audio_source)
+            else:
+                wav_file = open(audio_source, "rb")
+            
+            with wave.open(wav_file, "rb") as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate()
+                if rate > 0:
+                    return float(frames) / rate
+        except Exception as e:
+            logger.warning("Could not compute audio duration: %s", str(e))
+        return 0.0
 
     def transcribe(self, audio_source: Union[str, bytes]) -> str:
         """
@@ -141,11 +200,22 @@ class WhisperEngine(SpeechEngine):
             logger.error("Audio file does not exist: %s", audio_path)
             return ""
 
+        audio_duration = self._get_wav_duration(audio_source)
+
         try:
             start_time = time.time()
+            if getattr(Config, "DEBUG_AUDIO_PIPELINE", True):
+                logger.info("[DIAGNOSTIC] Whisper processing start: %.3f (%s)", start_time, time.strftime('%H:%M:%S', time.localtime(start_time)))
+
             with suppress_stdout_stderr():
                 segments = WhisperEngine._model.transcribe(audio_path, n_processors=4)
-            duration = time.time() - start_time
+
+            end_time = time.time()
+            if getattr(Config, "DEBUG_AUDIO_PIPELINE", True):
+                logger.info("[DIAGNOSTIC] Whisper processing end: %.3f (%s)", end_time, time.strftime('%H:%M:%S', time.localtime(end_time)))
+
+            duration = end_time - start_time
+            rtf = duration / audio_duration if audio_duration > 0.0 else 0.0
 
             raw_sentence = " ".join([seg.text.strip() for seg in segments]).strip()
             
@@ -159,6 +229,10 @@ class WhisperEngine(SpeechEngine):
 
             logger.info("Whisper final transcript: '%s'", final_sentence)
             logger.info("Whisper transcription duration: %.2f seconds", duration)
+            if getattr(Config, "DEBUG_AUDIO_PIPELINE", True):
+                logger.info("[DIAGNOSTIC] Total inference duration: %.2f seconds", duration)
+                logger.info("[DIAGNOSTIC] Audio duration: %.2f seconds", audio_duration)
+                logger.info("[DIAGNOSTIC] Real-Time Factor (RTF): %.4f", rtf)
 
             return final_sentence
 

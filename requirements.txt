@@ -20,3 +20,7 @@ onnxruntime>=1.12.0       # Required for morphix.onnx model execution (optional 
 
 # --- Speech-To-Text Transcription ---
 pywhispercpp>=0.1.0       # High-performance bindings for Whisper.cpp (tiny.en GGUF model)
+
+# --- Google Gemini AI Brain ---
+google-genai>=0.1.1       # Official modern Google Gen AI SDK
+python-dotenv>=0.19.0     # Environment variables loading

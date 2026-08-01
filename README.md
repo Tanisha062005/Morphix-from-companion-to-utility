@@ -83,6 +83,28 @@ python run_voice_assistant.py
 - Speak your command (e.g., `"remind me to feed the cat in five minutes"` or `"add buy groceries to my todo list"`).
 - Press `Ctrl+C` to terminate the application cleanly.
 
+## ⚙️ Environment Configuration
+
+To enable Gemini NLU features, configure your environment variables using the following steps:
+
+1. Create a `.env` file in the root directory.
+
+2. Open the `.env` file in your preferred editor.
+
+3. Add the following variables:
+   ```env
+   GEMINI_API_KEY=AIzaSyYourActualKeyHere
+   GEMINI_MODEL=gemini-2.5-flash
+   ```
+
+4. Save the `.env` file.
+
+5. Run Morphix:
+   ```bash
+   python run_voice_assistant.py
+   ```
+
+
 ---
 
 ## 🧪 Running Unit Tests
