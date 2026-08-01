@@ -8,6 +8,8 @@ Description:
 """
 
 import logging
+import random
+import re
 import time
 from typing import Any, Dict, Optional
 
@@ -37,9 +39,55 @@ class GeminiIntentEngine:
         self.last_transcript_time: float = 0.0
         self.last_result: Dict[str, Any] = {"intent": "UNKNOWN"}
 
+        # Rate limit circuit breaker state
+        self._consecutive_429s: int = 0
+        self._rate_limit_cooldown_until: float = 0.0
+
+    def _is_rate_limited(self) -> bool:
+        """Returns True if we are in the circuit-breaker cooldown window."""
+        if self._consecutive_429s >= GeminiConfig.RATE_LIMIT_CONSECUTIVE_THRESHOLD:
+            remaining = self._rate_limit_cooldown_until - time.time()
+            if remaining > 0:
+                logger.warning(
+                    "[RateLimit] Circuit breaker active. Skipping Gemini for %.0fs more. Falling back to local.",
+                    remaining
+                )
+                return True
+            else:
+                # Cooldown expired — reset and allow retrying
+                logger.info("[RateLimit] Cooldown expired. Resuming Gemini requests.")
+                self._consecutive_429s = 0
+        return False
+
+    @staticmethod
+    def _is_429_error(error: Exception) -> bool:
+        """Detects a 429 Too Many Requests / RESOURCE_EXHAUSTED error."""
+        error_str = str(error)
+        return (
+            "429" in error_str
+            or "RESOURCE_EXHAUSTED" in error_str
+            or "Too Many Requests" in error_str
+            or "quota" in error_str.lower()
+        )
+
+    @staticmethod
+    def _extract_retry_after(error: Exception) -> Optional[float]:
+        """Tries to parse a Retry-After delay (in seconds) from the error message."""
+        error_str = str(error)
+        # Look for 'retryDelay: "Xs"' pattern in Google API error bodies
+        match = re.search(r'retryDelay["\s:]+([\d.]+)', error_str)
+        if match:
+            return float(match.group(1))
+        # Also try plain 'retry_delay: X' or 'Retry-After: X'
+        match = re.search(r'[Rr]etry[_-][Aa]fter["\s:]+([\d.]+)', error_str)
+        if match:
+            return float(match.group(1))
+        return None
+
     def process_transcript(self, transcript: str) -> Dict[str, Any]:
         """
-        Extracts structured intent with retry, timeout limits, and deduplication windows.
+        Extracts structured intent with retry, exponential backoff on 429 rate limits,
+        circuit-breaker cooldown, timeout constraints, and deduplication windows.
 
         :param transcript: Raw Cleaned transcript.
         :return: Validated intent dictionary.
@@ -68,6 +116,11 @@ class GeminiIntentEngine:
 
         if not self.client.is_available() or not self.client.validate_key_if_first_time():
             logger.warning("Gemini Client not available. Disabling engine processing.")
+            self.last_result = {"intent": "UNKNOWN"}
+            return self.last_result
+
+        # Circuit breaker: skip Gemini entirely during cooldown window
+        if self._is_rate_limited():
             self.last_result = {"intent": "UNKNOWN"}
             return self.last_result
 
@@ -100,8 +153,14 @@ class GeminiIntentEngine:
                     # Advisory check for confidence threshold
                     confidence = parsed.get("confidence", 0.0)
                     if confidence < GeminiConfig.CONFIDENCE_THRESHOLD:
-                        logger.info("Gemini confidence %.2f is below threshold %.2f. Mapping intent to UNKNOWN.", confidence, GeminiConfig.CONFIDENCE_THRESHOLD)
+                        logger.info(
+                            "Gemini confidence %.2f is below threshold %.2f. Mapping intent to UNKNOWN.",
+                            confidence, GeminiConfig.CONFIDENCE_THRESHOLD
+                        )
                         parsed["intent"] = "UNKNOWN"
+
+                    # Successful call — reset rate limit counter
+                    self._consecutive_429s = 0
 
                     log_gemini_event(
                         request_type="intent",
@@ -133,20 +192,86 @@ class GeminiIntentEngine:
                         source="GEMINI",
                         inference_time=inference_time
                     )
+
             except Exception as e:
                 latency = time.time() - start_time
-                log_gemini_event(
-                    request_type="intent",
-                    intent="UNKNOWN",
-                    latency=latency,
-                    success=False,
-                    model_name=self.client.model_name,
-                    retry_count=attempt,
-                    validation_result="FAIL",
-                    error_msg=str(e),
-                    source="GEMINI",
-                    inference_time=latency
-                )
+
+                if self._is_429_error(e):
+                    self._consecutive_429s += 1
+
+                    # Engage circuit breaker if threshold exceeded
+                    if self._consecutive_429s >= GeminiConfig.RATE_LIMIT_CONSECUTIVE_THRESHOLD:
+                        self._rate_limit_cooldown_until = time.time() + GeminiConfig.RATE_LIMIT_COOLDOWN_SECONDS
+                        logger.warning(
+                            "[RateLimit] %d consecutive 429s — circuit breaker engaged. "
+                            "Pausing Gemini for %.0fs. Falling back to local parsers.",
+                            self._consecutive_429s, GeminiConfig.RATE_LIMIT_COOLDOWN_SECONDS
+                        )
+                        log_gemini_event(
+                            request_type="intent",
+                            intent="UNKNOWN",
+                            latency=latency,
+                            success=False,
+                            model_name=self.client.model_name,
+                            retry_count=attempt,
+                            validation_result="FAIL",
+                            error_msg="429 RESOURCE_EXHAUSTED — circuit breaker engaged",
+                            source="GEMINI",
+                            inference_time=latency
+                        )
+                        break  # Exit retry loop immediately, fall back to local
+
+                    # Exponential backoff with jitter before next retry
+                    # Try to honor Retry-After from the error if present
+                    retry_after = self._extract_retry_after(e)
+                    if retry_after:
+                        backoff = min(retry_after, GeminiConfig.RATE_LIMIT_BACKOFF_MAX)
+                        logger.warning(
+                            "[RateLimit] 429 received (attempt %d/%d). Honoring Retry-After: %.1fs.",
+                            attempt + 1, max_attempts, backoff
+                        )
+                    else:
+                        # Exponential backoff: base * 2^attempt + random jitter
+                        backoff = min(
+                            GeminiConfig.RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                            + random.uniform(0.0, 1.0),
+                            GeminiConfig.RATE_LIMIT_BACKOFF_MAX
+                        )
+                        logger.warning(
+                            "[RateLimit] 429 received (attempt %d/%d). Backing off %.1fs before retry.",
+                            attempt + 1, max_attempts, backoff
+                        )
+
+                    log_gemini_event(
+                        request_type="intent",
+                        intent="UNKNOWN",
+                        latency=latency,
+                        success=False,
+                        model_name=self.client.model_name,
+                        retry_count=attempt,
+                        validation_result="FAIL",
+                        error_msg=f"429 RESOURCE_EXHAUSTED — retrying in {backoff:.1f}s",
+                        source="GEMINI",
+                        inference_time=latency
+                    )
+
+                    if attempt < max_attempts - 1:
+                        time.sleep(backoff)
+
+                else:
+                    # Non-rate-limit error — log and continue to next attempt
+                    log_gemini_event(
+                        request_type="intent",
+                        intent="UNKNOWN",
+                        latency=latency,
+                        success=False,
+                        model_name=self.client.model_name,
+                        retry_count=attempt,
+                        validation_result="FAIL",
+                        error_msg=str(e),
+                        source="GEMINI",
+                        inference_time=latency
+                    )
 
         self.last_result = {"intent": "UNKNOWN"}
         return self.last_result
@@ -216,14 +341,28 @@ class GeminiIntentEngine:
 
         except Exception as e:
             latency = time.time() - start_time
-            log_gemini_event(
-                request_type="chat",
-                intent="CHAT",
-                latency=latency,
-                success=False,
-                model_name=self.client.model_name,
-                error_msg=str(e),
-                source="GEMINI",
-                inference_time=latency
-            )
-            return "I'm sorry, I couldn't process that request right now."
+            if self._is_429_error(e):
+                self._consecutive_429s += 1
+                log_gemini_event(
+                    request_type="chat",
+                    intent="CHAT",
+                    latency=latency,
+                    success=False,
+                    model_name=self.client.model_name,
+                    error_msg="429 RESOURCE_EXHAUSTED",
+                    source="GEMINI",
+                    inference_time=latency
+                )
+                return "I'm a bit overwhelmed right now — too many requests. Please try again in a moment."
+            else:
+                log_gemini_event(
+                    request_type="chat",
+                    intent="CHAT",
+                    latency=latency,
+                    success=False,
+                    model_name=self.client.model_name,
+                    error_msg=str(e),
+                    source="GEMINI",
+                    inference_time=latency
+                )
+                return "I'm sorry, I couldn't process that request right now."
