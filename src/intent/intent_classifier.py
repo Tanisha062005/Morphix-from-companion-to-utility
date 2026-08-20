@@ -61,7 +61,8 @@ class TodoIntentPlugin:
         clear_patterns = [
             r"clear (my )?(to-?do|tasks?)( list)?$",
             r"delete all (tasks|to-?dos?)$",
-            r"remove all (tasks|to-?dos?)$"
+            r"remove all (tasks|to-?dos?)$",
+            r"^saare\s+todo\s+(?:delete|hata|clear)(?:\s+(?:kar\s+)?do|\s+karo)?$"
         ]
         for pat in clear_patterns:
             if re.search(pat, lowercased):
@@ -73,7 +74,8 @@ class TodoIntentPlugin:
             r"what are my (tasks|to-?dos?)$",
             r"read (my )?(to-?do|tasks?)( list)?$",
             r"list (my )?tasks$",
-            r"get (my )?tasks$"
+            r"get (my )?tasks$",
+            r"^(?:mera|mere)?\s*todo\s+(?:dikhao|batao|kya\s+kya\s+hai|kya hai)$"
         ]
         for pat in show_patterns:
             if re.search(pat, lowercased):
@@ -106,7 +108,8 @@ class TodoIntentPlugin:
             r"delete (?P<task>.+)",
             r"remove task (?P<task>.+)",
             r"remove (?P<task>.+) from (my )?(to-?do|tasks?)( list)?",
-            r"remove (?P<task>.+)"
+            r"remove (?P<task>.+)",
+            r"^(?P<task>.+?)\s+(?:todo|list)\s+(?:se\s+)?(?:delete|hata|remove)(?:\s+(?:kar\s+)?do|\s*karo)?$"
         ]
         for pat in delete_patterns:
             m = re.match(pat, lowercased)
@@ -122,9 +125,13 @@ class TodoIntentPlugin:
 
         # 5. ADD_TODO
         add_patterns = [
+            r"add (?P<task>.+) to (?:my )?todo",
             r"add (?P<task>.+) to (my )?(to-?do|tasks?)( list)?",
             r"add task (?P<task>.+)",
-            r"add (?P<task>.+)"
+            r"add (?P<task>.+)",
+            r"(?:todo|list) mein (?P<task>.+) (?:daal do|add karo|likh do)",
+            r"^(?:todo|list)\s+(?:mein|me)\s+(?P<task>.+?)\s+(?:daal do|add karo|likh do|add kar do|karo)$",
+            r"टूडू में (?P<task>.+) (?:जोड़ो|डालो)"
         ]
         for pat in add_patterns:
             m = re.match(pat, lowercased)
@@ -178,7 +185,31 @@ class ReminderIntentPlugin:
                 )
 
         # 3. ADD_REMINDER
+        # Check Hindi/Hinglish remind patterns first
+        p_hindi1 = r"^(?:mujhe|mera|mere|मुझे)\s+(?P<time_expr>\d+\s*(?:minute|min|seconds|sec|hour|hr|minutes|hours|second|secs|hours|days|day|दिन|घंटे|मिनट|सेकंड|सेकण्ड|आर)(?:\s*(?:baad|mein|me|in|after|at|बाद|में))?)\s+(?P<text>.+?)\s+(?:yaad dilana|remind karna|yaad dilaye|याद दिलाना)(?:\s*(?:baad|mein|me|बाद|में))?$"
+        p_hindi2 = r"^(?:mujhe|mera|mere|मुझे)\s+(?P<text>.+?)\s+(?P<time_expr>\d+\s*(?:minute|min|seconds|sec|hour|hr|minutes|hours|second|secs|hours|days|day|दिन|घंटे|मिनट|सेकंड|सेकण्ड|आर)(?:\s*(?:baad|mein|me|in|after|at|बाद|में))?)\s+(?:yaad dilana|remind karna|yaad dilaye|याद दिलाना)$"
+        p_hindi3 = r"^(?:mujhe|mera|mere|मुझे)\s+(?P<text>.+?)\s+(?:yaad dilana|remind karna|yaad dilaye|याद दिलाना)\s+(?P<time_expr>.+)$"
+        
+        # User requested specific patterns
+        p_req_hi = r"^(?:mujhe|mera)\s+(?P<text>.+?)\s+yaad dilana$"
+        p_req_deva = r"^मुझे\s+(?P<text>.+?)\s+याद दिलाना$"
+        p_hindi_fallback = r"^(?:mujhe|mera|mere|मुझे)\s+(?P<text>.+?)\s+(?:yaad dilana|remind karna|yaad dilaye|याद दिलाना)$"
+
+        for pat in [p_hindi1, p_hindi2, p_hindi3, p_req_hi, p_req_deva, p_hindi_fallback]:
+            m = re.match(pat, lowercased)
+            if m:
+                groups = m.groupdict()
+                text_param = groups.get("text", "").strip() if groups.get("text") else ""
+                time_param = groups.get("time_expr", "").strip() if groups.get("time_expr") else ""
+                return IntentResult(
+                    intent=IntentType.ADD_REMINDER,
+                    parameters={"text": text_param if text_param else lowercased, "time_expr": time_param},
+                    confidence=0.95,
+                    raw_text=text
+                )
+
         remind_patterns = [
+            r"remind me to (?P<text>.+) (?:in|after) (?P<time_expr>.+)", # User requested English pattern
             r"remind me to (?P<text>.+) (at|in|after|today at|tomorrow at) (?P<time_expr>.+)",
             r"remind me (at|in|after|today at|tomorrow at) (?P<time_expr>.+) to (?P<text>.+)",
             r"remind me to (?P<text>.+)",

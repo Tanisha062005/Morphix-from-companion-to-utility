@@ -14,8 +14,9 @@ class GeminiConfig:
     """
     Constant settings and validation configuration constraints for Gemini.
     """
-    # Prevent collision with Whisper configuration (e.g. MODEL=tiny.en)
-    DEFAULT_MODEL_NAME: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    # gemini-flash-lite-latest is the confirmed working model for this key
+    # Override via GEMINI_MODEL= in .env if needed
+    DEFAULT_MODEL_NAME: str = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
     
     INTENT_TEMPERATURE: float = 0.0
     CHAT_TEMPERATURE: float = 0.7

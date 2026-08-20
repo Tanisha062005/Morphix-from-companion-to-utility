@@ -46,6 +46,46 @@ class SoundPlayer:
         # Automatically create assets/sounds/ directory if it does not exist
         self._ensure_sounds_directory()
 
+        self.preloaded_sounds = {}
+        self.bark_channel = None
+        self._init_mixer_and_preload()
+
+    def _init_mixer_and_preload(self) -> None:
+        """
+        Pre-initializes the pygame mixer once and preloads morphix_voice.wav into memory.
+        """
+        try:
+            import pygame
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            logger.info("pygame.mixer initialized successfully at startup.")
+
+            # Preload morphix_voice.wav
+            wake_sound_name = "morphix_voice.wav"
+            candidates = [
+                self.sounds_dir / wake_sound_name,
+                self.project_root / "assets" / "sounds" / wake_sound_name,
+                Path("assets/sounds") / wake_sound_name,
+                Path("assets/sounds/morphix_voice.wav")
+            ]
+            for p in candidates:
+                resolved = p.resolve()
+                if resolved.exists() and resolved.is_file():
+                    sound = pygame.mixer.Sound(str(resolved))
+                    # Store multiple formats of the key for robust lookups
+                    self.preloaded_sounds[wake_sound_name] = sound
+                    self.preloaded_sounds[str(resolved)] = sound
+                    self.preloaded_sounds[str(p)] = sound
+                    self.preloaded_sounds["assets/sounds/morphix_voice.wav"] = sound
+                    logger.info("Pre-loaded sound asset: %s", resolved)
+                    break
+            else:
+                logger.warning("Could not locate %s for pre-loading at startup.", wake_sound_name)
+        except ImportError:
+            logger.error("pygame module is not installed. Audio pre-loading and playback will be unavailable.")
+        except Exception as e:
+            logger.error("Error during pygame mixer initialization or sound pre-loading: %s", str(e))
+
     def _find_project_root(self) -> Path:
         """
         Locates project root directory using pathlib.
@@ -76,58 +116,83 @@ class SoundPlayer:
         """
         return self.sounds_dir
 
-    def play_sound(self, sound_file: Union[str, Path]) -> bool:
+    def play_sound(self, sound_file: Union[str, Path], blocking: bool = True) -> bool:
         """
-        Plays a WAV audio file synchronously (blocking until playback completes).
-        Gracefully handles missing files or playback failures.
+        Plays a WAV audio file. Uses preloaded sound in memory if available.
+        Can play synchronously (blocking) or asynchronously (non-blocking).
 
         :param sound_file: Path or filename of the WAV file to play.
+        :param blocking: If True, blocks execution until playback completes.
+                         If False, plays in the background and returns immediately.
         :return: True if audio was played successfully, False otherwise.
         """
         file_path = Path(sound_file)
-        if not file_path.is_absolute():
-            # If relative path, look inside sounds_dir first, then relative to working directory
-            candidate_path = self.sounds_dir / file_path
-            if candidate_path.exists():
-                file_path = candidate_path
-            else:
-                file_path = file_path.resolve()
+        file_str = str(sound_file)
 
-        # Handle missing files gracefully
-        if not file_path.exists() or not file_path.is_file():
-            logger.info("Audio file not found at '%s'. Skipping playback gracefully.", file_path)
-            return False
+        # Check if preloaded
+        sound = None
+        for key in [file_str, file_path.name, str(file_path.resolve())]:
+            if key in self.preloaded_sounds:
+                sound = self.preloaded_sounds[key]
+                break
 
-        # Attempt audio playback using pygame.mixer
+        # Attempt to play
         try:
             import pygame
 
-            # Safely initialize pygame mixer
+            # Ensure mixer is initialized
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
 
-            logger.info("Starting playback for audio file: %s", file_path)
-            sound = pygame.mixer.Sound(str(file_path))
+            if sound is None:
+                if not file_path.is_absolute():
+                    candidate_path = self.sounds_dir / file_path
+                    if candidate_path.exists():
+                        file_path = candidate_path
+                    else:
+                        file_path = file_path.resolve()
+
+                if not file_path.exists() or not file_path.is_file():
+                    logger.info("Audio file not found at '%s'. Skipping playback gracefully.", file_path)
+                    return False
+
+                logger.info("Loading audio file dynamically: %s", file_path)
+                sound = pygame.mixer.Sound(str(file_path))
+
+            logger.info("Starting playback for audio file: %s (blocking=%s)", sound_file, blocking)
             channel = sound.play()
 
-            # Blocking wait until playback finishes
-            while channel and channel.get_busy():
-                pygame.time.wait(30)
+            # Keep track of the last played channel in case we need channel-specific check
+            if "morphix_voice.wav" in file_str or file_path.name == "morphix_voice.wav":
+                self.bark_channel = channel
 
-            logger.info("Completed playback for audio file: %s", file_path)
+            if blocking:
+                # Blocking wait until playback finishes
+                while channel and channel.get_busy():
+                    pygame.time.wait(30)
+                logger.info("Completed blocking playback for audio file: %s", sound_file)
+
             return True
 
         except ImportError:
-            logger.error("pygame module is not installed. Unable to play audio file '%s'.", file_path)
+            logger.error("pygame module is not installed. Unable to play audio file '%s'.", sound_file)
             return False
         except Exception as e:
-            logger.error("Error occurred while playing sound '%s': %s", file_path, str(e))
+            logger.error("Error occurred while playing sound '%s': %s", sound_file, str(e))
             return False
-        finally:
-            # Safely shut down pygame.mixer after playback attempt
-            try:
-                import pygame
-                if pygame.mixer.get_init():
-                    pygame.mixer.quit()
-            except Exception:
-                pass
+
+    def is_playing(self) -> bool:
+        """
+        Checks if the pygame mixer is currently playing any audio.
+        """
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                # First check our registered bark channel
+                if self.bark_channel and self.bark_channel.get_busy():
+                    return True
+                # Fallback to general mixer activity check
+                return pygame.mixer.get_busy()
+        except Exception:
+            pass
+        return False

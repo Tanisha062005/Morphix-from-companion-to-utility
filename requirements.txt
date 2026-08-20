@@ -21,6 +21,10 @@ onnxruntime>=1.12.0       # Required for morphix.onnx model execution (optional 
 # --- Speech-To-Text Transcription ---
 pywhispercpp>=0.1.0       # High-performance bindings for Whisper.cpp (tiny.en GGUF model)
 
+# --- Text-To-Speech (Microsoft Edge TTS) ---
+edge-tts>=6.1.9           # Microsoft Edge TTS (Aarti Neural voice, en-IN & hi-IN)
+
 # --- Google Gemini AI Brain ---
 google-genai>=0.1.1       # Official modern Google Gen AI SDK
 python-dotenv>=0.19.0     # Environment variables loading
+groq>=1.6.0               # Groq Cloud API SDK for conversational brain

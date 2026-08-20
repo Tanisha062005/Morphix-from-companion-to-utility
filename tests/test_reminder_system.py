@@ -64,7 +64,10 @@ class TestReminderParser(unittest.TestCase):
             ("remind me tomorrow", {"intent": "SET_REMINDER", "message": "", "time_expr": "tomorrow"}),
             ("remind me tomorrow at 5 pm", {"intent": "SET_REMINDER", "message": "", "time_expr": "tomorrow at 5 pm"}),
             ("remind me today at 8 pm", {"intent": "SET_REMINDER", "message": "", "time_expr": "today at 8 pm"}),
-            ("remind me after 30 seconds", {"intent": "SET_REMINDER", "message": "", "delay": 30, "time_expr": "after 30 seconds"})
+            ("remind me after 30 seconds", {"intent": "SET_REMINDER", "message": "", "delay": 30, "time_expr": "after 30 seconds"}),
+            ("mujhe 5 minute baad milk boil karne ka yaad dilana", {"intent": "SET_REMINDER", "message": "milk boil karne ka", "delay": 300, "time_expr": "5 minute baad"}),
+            ("mujhe milk boil karne ka yaad dilana 5 minute baad", {"intent": "SET_REMINDER", "message": "milk boil karne ka", "delay": 300, "time_expr": "5 minute baad"}),
+            ("मुझे ५ मिनट बाद दूध उबालने का याद दिलाना", {"intent": "SET_REMINDER", "message": "दूध उबालने का", "delay": 300, "time_expr": "5 मिनट बाद"})
         ]
         for phrase, expected in phrases:
             with self.subTest(phrase=phrase):

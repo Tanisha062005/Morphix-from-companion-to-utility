@@ -74,7 +74,11 @@ def get_local_timezone() -> ZoneInfo:
     try:
         tz = datetime.now().astimezone().tzinfo
         if tz is not None:
-            return ZoneInfo(tz.tzname(None))
+            tz_key = tz.tzname(None)
+            try:
+                return ZoneInfo(tz_key)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -327,7 +331,7 @@ class ReminderManager:
         due_reminders = []
 
         for rem in reminders:
-            if rem.get("status", "pending") != "pending" and not rem.get("completed", False) == False:
+            if rem.get("status") != "pending" or rem.get("completed", False):
                 continue
 
             trig_str = rem.get("trigger_time", "")

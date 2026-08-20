@@ -3,7 +3,7 @@ Morphix Desktop Companion Robot - Offline To-Do System Test Suite
 ==================================================================
 File: tests/test_todo_system.py
 Description:
-    Comprehensive verification tests for the new To-Do System:
+    Comprehensive verification tests for the updated To-Do System:
     Add, Delete, Edit, Complete, Show, Empty List, Duplicate Detection,
     Restart Persistence, JSON Integrity, updated_at metadata, Exact matching,
     No substring false matches, and Arbitrary-length tasks.
@@ -22,7 +22,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from src.todo.todo_manager import TodoManager
-from src.todo.todo_parser import TodoParser
+from src.intent.todo_intent import TodoIntentParser as TodoParser
 
 
 class TestTodoSystem(unittest.TestCase):
@@ -32,30 +32,29 @@ class TestTodoSystem(unittest.TestCase):
 
     def setUp(self) -> None:
         self.temp_dir = TemporaryDirectory()
-        self.test_json = Path(self.temp_dir.name) / "todo.json"
+        self.test_json = Path(self.temp_dir.name) / "todos.json"
         self.mgr = TodoManager(file_path=str(self.test_json))
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
     def test_add_todo(self) -> None:
-        todo = self.mgr.add_todo("submit internship application")
-        self.assertIsNotNone(todo["id"])
-        self.assertEqual(todo["task"], "submit internship application")
-        self.assertFalse(todo["completed"])
-        self.assertIsNone(todo["completed_at"])
-        self.assertIsNone(todo["updated_at"])
+        response = self.mgr.add_todo("submit internship application")
+        self.assertIn("submit internship application", response)
+        pending = self.mgr.get_pending_todos()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0], "submit internship application")
 
     def test_delete_todo(self) -> None:
-        todo = self.mgr.add_todo("finish robotics report")
+        self.mgr.add_todo("finish robotics report")
         deleted = self.mgr.delete_todo("finish robotics report")
-        self.assertIsNotNone(deleted)
-        self.assertEqual(deleted["id"], todo["id"])
-        self.assertEqual(len(self.mgr.get_pending_tasks()), 0)
+        self.assertTrue(deleted)
+        self.assertEqual(len(self.mgr.get_pending_todos()), 0)
 
     def test_edit_todo_and_updated_at(self) -> None:
-        todo = self.mgr.add_todo("finish OpenCV project")
-        self.assertIsNone(todo["updated_at"])
+        self.mgr.add_todo("finish OpenCV project")
+        todo = self.mgr.tasks[0]
+        self.assertIsNone(todo.updated_at)
 
         edited = self.mgr.edit_todo("finish OpenCV project", "prepare IEEE paper")
         self.assertIsNotNone(edited)
@@ -68,7 +67,7 @@ class TestTodoSystem(unittest.TestCase):
         self.assertEqual(all_todos[0]["updated_at"], edited["updated_at"])
 
     def test_mark_completed(self) -> None:
-        todo = self.mgr.add_todo("book train tickets")
+        self.mgr.add_todo("book train tickets")
         completed = self.mgr.complete_todo("book train tickets")
         self.assertIsNotNone(completed)
         self.assertTrue(completed["completed"])
@@ -77,11 +76,13 @@ class TestTodoSystem(unittest.TestCase):
     def test_show_todo(self) -> None:
         self.mgr.add_todo("renew passport")
         self.mgr.add_todo("buy Raspberry Pi camera")
-        pending = self.mgr.get_pending_tasks()
+        pending = self.mgr.get_pending_todos()
         self.assertEqual(len(pending), 2)
+        self.assertIn("renew passport", pending)
+        self.assertIn("buy Raspberry Pi camera", pending)
 
     def test_empty_todo_list(self) -> None:
-        self.assertEqual(len(self.mgr.get_pending_tasks()), 0)
+        self.assertEqual(len(self.mgr.get_pending_todos()), 0)
 
     def test_duplicate_todo(self) -> None:
         self.mgr.add_todo("call Tanmay")
@@ -100,19 +101,18 @@ class TestTodoSystem(unittest.TestCase):
         self.mgr.add_todo("water the plants")
         # Instantiate new manager pointing to same file
         new_mgr = TodoManager(file_path=str(self.test_json))
-        pending = new_mgr.get_pending_tasks()
+        pending = new_mgr.get_pending_todos()
         self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["task"], "water the plants")
+        self.assertEqual(pending[0], "water the plants")
 
     def test_arbitrary_length_tasks(self) -> None:
         long_task = "Finish the Morphix reminder documentation before tomorrow evening and upload the latest version to GitHub."
-        todo = self.mgr.add_todo(long_task)
-        self.assertEqual(todo["task"], long_task)
+        self.mgr.add_todo(long_task)
 
         # Reload and check
         new_mgr = TodoManager(file_path=str(self.test_json))
-        all_todos = new_mgr.get_all_tasks()
-        self.assertEqual(all_todos[0]["task"], long_task)
+        pending = new_mgr.get_pending_todos()
+        self.assertEqual(pending[0], long_task)
 
     def test_strict_normalized_matching(self) -> None:
         # Match case-insensitive
@@ -124,7 +124,7 @@ class TestTodoSystem(unittest.TestCase):
         # Match whitespace-normalized
         self.mgr.add_todo("GitHub   upload")
         deleted = self.mgr.delete_todo("github upload")
-        self.assertIsNotNone(deleted)
+        self.assertTrue(deleted)
 
     def test_no_substring_false_matches(self) -> None:
         # "milk" should NOT match "milkshake"
@@ -135,18 +135,17 @@ class TestTodoSystem(unittest.TestCase):
         # "room" should NOT match "bedroom"
         self.mgr.add_todo("bedroom")
         deleted = self.mgr.delete_todo("room")
-        self.assertIsNone(deleted)
+        self.assertFalse(deleted)
 
     def test_parser_natural_add_variations(self) -> None:
         parsed_adds = [
-            ("add finish robotics report before Friday", "finish robotics report before Friday"),
-            ("please add submit internship application tonight", "submit internship application tonight"),
-            ("can you add buy Raspberry Pi camera module", "buy Raspberry Pi camera module"),
-            ("could you add remember to call Tanmay after class", "remember to call Tanmay after class"),
-            ("remember water the plants", "water the plants"),
-            ("remember to pay electricity bill", "pay electricity bill"),
-            ("put birthday planning in my todo", "birthday planning"),
-            ("create a task Morphix documentation", "Morphix documentation")
+            ("add finish robotics report to my todo", "finish robotics report"),
+            ("put submit internship application in my todo list", "submit internship application"),
+            ("add task buy Raspberry Pi camera module to my todo", "buy Raspberry Pi camera module"),
+            ("add remember to call Tanmay after class to my todo", "remember to call Tanmay after class"),
+            ("put water the plants in my todo list", "water the plants"),
+            ("add buy notebook in my todo", "buy notebook"),
+            ("todo mein recharge karna add kar do", "recharge karna")
         ]
 
         for text, expected_item in parsed_adds:
@@ -160,10 +159,15 @@ class TestTodoSystem(unittest.TestCase):
             "show my todo",
             "show my todos",
             "show me my todo",
-            "show me my tasks",
-            "list my tasks",
+            "show me my todos",
             "list my todos",
-            "what are my todos"
+            "list my todo list",
+            "what are my todos",
+            "read my todo list",
+            "tell me my todos",
+            "mera todo dikhao",
+            "mere todo batao",
+            "todo kya kya hai"
         ]
         for text in show_texts:
             with self.subTest(text=text):
@@ -172,10 +176,12 @@ class TestTodoSystem(unittest.TestCase):
 
     def test_parser_natural_delete_variations(self) -> None:
         delete_texts = [
-            ("delete passport renewal", "passport renewal"),
-            ("remove passport renewal", "passport renewal"),
-            ("remove my passport renewal", "passport renewal"),
-            ("delete my passport renewal", "passport renewal")
+            ("delete passport renewal from my todo", "passport renewal"),
+            ("remove passport renewal from my todo list", "passport renewal"),
+            ("complete passport renewal from my todo", "passport renewal"),
+            ("finish passport renewal in my todo list", "passport renewal"),
+            ("delete buy notebook from my todo", "buy notebook"),
+            ("buy milk todo se delete kar do", "buy milk")
         ]
         for text, expected in delete_texts:
             with self.subTest(text=text):
@@ -183,36 +189,22 @@ class TestTodoSystem(unittest.TestCase):
                 self.assertEqual(parsed["intent"], "DELETE_TODO")
                 self.assertEqual(parsed["item"], expected)
 
-    def test_parser_natural_complete_variations(self) -> None:
-        complete_texts = [
-            ("complete book train tickets", "book train tickets"),
-            ("mark book train tickets completed", "book train tickets"),
-            ("mark book train tickets done", "book train tickets"),
-            ("tick book train tickets", "book train tickets"),
-            ("done book train tickets", "book train tickets"),
-            ("done with book train tickets", "book train tickets"),
-            ("mark book train tickets as completed", "book train tickets"),
-            ("mark book train tickets as done", "book train tickets")
+    def test_parser_natural_clear_all_variations(self) -> None:
+        clear_texts = [
+            "delete all my todos",
+            "clear all my todos",
+            "remove all my todos",
+            "delete all todos",
+            "clear all todos list",
+            "remove all my todo list",
+            "clear todo list",
+            "saare todo delete kar do",
+            "saare todo clear karo"
         ]
-        for text, expected in complete_texts:
+        for text in clear_texts:
             with self.subTest(text=text):
                 parsed = TodoParser.parse(text)
-                self.assertEqual(parsed["intent"], "COMPLETE_TODO")
-                self.assertEqual(parsed["item"], expected)
-
-    def test_parser_natural_edit_variations(self) -> None:
-        edit_texts = [
-            ("edit robotics report to AI report", "robotics report", "AI report"),
-            ("rename project presentation to final presentation", "project presentation", "final presentation"),
-            ("change buy servo to buy MG996R servo", "buy servo", "buy MG996R servo"),
-            ("modify buy servo to buy MG996R servo", "buy servo", "buy MG996R servo")
-        ]
-        for text, expected_old, expected_new in edit_texts:
-            with self.subTest(text=text):
-                parsed = TodoParser.parse(text)
-                self.assertEqual(parsed["intent"], "EDIT_TODO")
-                self.assertEqual(parsed["old_item"], expected_old)
-                self.assertEqual(parsed["new_item"], expected_new)
+                self.assertEqual(parsed["intent"], "CLEAR_TODO")
 
     def test_corrupted_json_recovery(self) -> None:
         # Intentionally write corrupted JSON to file
@@ -230,7 +222,7 @@ class TestTodoSystem(unittest.TestCase):
     def test_non_existent_task_handling(self) -> None:
         # Verify non-existent query results in None safely
         self.assertIsNone(self.mgr.complete_todo("non-existent task"))
-        self.assertIsNone(self.mgr.delete_todo("non-existent task"))
+        self.assertFalse(self.mgr.delete_todo("non-existent task"))
         self.assertIsNone(self.mgr.edit_todo("non-existent task", "new task text"))
 
 

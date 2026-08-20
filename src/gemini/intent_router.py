@@ -73,11 +73,15 @@ class IntentRouter:
             return "Todo completed." if completed else "Todo not found."
 
         elif intent == "SHOW_TODO":
-            pending = self.todo_mgr.get_pending_tasks()
+            pending = self.todo_mgr.get_pending_todos()
             if not pending:
                 return "Todo list is empty."
-            task_list_str = ", ".join(f"{i+1}. {t.get('task')}" for i, t in enumerate(pending))
+            task_list_str = ", ".join(f"{i+1}. {t}" for i, t in enumerate(pending))
             return f"You have {len(pending)} pending tasks: {task_list_str}."
+
+        elif intent == "CLEAR_TODO":
+            self.todo_mgr.clear_all_todos()
+            return "All tasks have been cleared from your todo list."
 
         elif intent == "SET_REMINDER":
             msg = validated_intent.get("message", "")

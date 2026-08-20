@@ -73,7 +73,7 @@ class TestGeminiSystem(unittest.TestCase):
 
     def test_api_initialization(self) -> None:
         self.assertTrue(self.client.is_available())
-        self.assertEqual(self.client.model_name, "gemini-2.5-flash")
+        self.assertEqual(self.client.model_name, GeminiConfig.DEFAULT_MODEL_NAME)
 
     def test_missing_api_key(self) -> None:
         # Temporarily clear key

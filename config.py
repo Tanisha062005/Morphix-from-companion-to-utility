@@ -23,6 +23,7 @@ class Config:
     ROBOT_NAME: str = "Morphix"
     ROBOT_VERSION: str = "1.0.0"
     DEVELOPER_NAME: str = "Developer"
+    GEMINI_ENABLED: bool = False
 
     # -------------------------------------------------------------------------
     # 2. Personality Settings
@@ -38,10 +39,10 @@ class Config:
     OFFLINE_MODE: bool = True
     WAKE_RESPONSE: str = "Listening."
     WAKE_SOUND: str = "assets/sounds/morphix_voice.wav"
-    STT_MODEL: str = os.getenv("MODEL", "tiny.en")
+    STT_MODEL: str = os.getenv("MODEL", "base.en")
     WHISPER_MODELS_DIR: str = "models/whisper"
     WAKE_WORD_THRESHOLD: float = 82.0
-    ACTIVE_MODE_TIMEOUT: int = 300
+    ACTIVE_MODE_TIMEOUT: float = 20.0
 
     # Wake Word Pipeline Configuration
     WAKE_PHRASE: str = "hey morphix"
@@ -108,7 +109,7 @@ class Config:
     DEBUG_MODE: bool = True
     LOGGING_ENABLED: bool = True
     DEVELOPMENT_MODE: bool = False
-    DEBUG_AUDIO_PIPELINE: bool = True
+    DEBUG_AUDIO_PIPELINE: bool = False
     COMMAND_QUEUE_WARMUP_TIMEOUT: float = 1.0
 
 

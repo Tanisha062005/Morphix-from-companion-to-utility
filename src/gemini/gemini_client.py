@@ -19,30 +19,28 @@ logger = logging.getLogger("Morphix.GeminiClient")
 
 def validate_api_key(api_key: Optional[str]) -> Tuple[bool, str]:
     """
-    Validates the structure of the Gemini API key.
+    Validates Gemini API key format (length, prefix, and placeholders).
     Returns (is_valid, reason_if_invalid).
     """
-    if not api_key:
-        return False, "GEMINI_API_KEY environment variable is missing or empty"
+    if not api_key or not api_key.strip():
+        return False, "GEMINI_API_KEY is missing or empty in .env"
+    
+    key_strip = api_key.strip()
+    key_lower = key_strip.lower()
+    
+    # 1. Check placeholders
+    placeholders = ["your_api_key_here", "insert_key_here", "placeholder"]
+    for ph in placeholders:
+        if ph in key_lower:
+            return False, "GEMINI_API_KEY is a placeholder"
+            
+    # 2. Check length threshold (must be > 15 characters)
+    if len(key_strip) <= 15:
+        return False, "GEMINI_API_KEY is too short (must be > 15 characters)"
         
-    cleaned = api_key.strip()
-    if not cleaned:
-        return False, "GEMINI_API_KEY environment variable is empty or whitespace"
-        
-    placeholders = {
-        "your_api_key", "your_gemini_api_key", "insert_key_here", "your_api_key_here",
-        "placeholder", "your-api-key", "xxxx"
-    }
-    if cleaned.lower() in placeholders or "placeholder" in cleaned.lower():
-        return False, "GEMINI_API_KEY contains a placeholder value"
-        
-    if len(cleaned) < 15:
-        return False, "GEMINI_API_KEY is too short (must be at least 15 characters)"
-        
-    # Check expected prefixes: Gemini API keys normally start with 'AIzaSy'
-    # We also support 'test_' prefix for local mock testing
-    if not (cleaned.startswith("AIzaSy") or cleaned.startswith("test_")):
-        return False, "GEMINI_API_KEY does not start with expected prefix ('AIzaSy' or 'test_')"
+    # 3. Check valid prefix
+    if not (key_strip.startswith("AIzaSy") or key_strip.startswith("test_mock")):
+        return False, "GEMINI_API_KEY does not have a valid prefix"
         
     return True, ""
 

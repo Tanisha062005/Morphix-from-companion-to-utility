@@ -61,8 +61,8 @@
         "created_at": "2026-08-01T23:44:12.638611+05:30",
         "trigger_time": "2026-08-02T09:00:00+05:30",
         "timezone": "Asia/Kolkata",
-        "status": "pending",
-        "completed": false,
+        "status": "completed",
+        "completed": true,
         "repeat": "none"
     },
     {
@@ -83,8 +83,8 @@
         "created_at": "2026-08-02T00:57:48.422803+05:30",
         "trigger_time": "2026-08-02T01:07:48.422187+05:30",
         "timezone": "Asia/Kolkata",
-        "status": "pending",
-        "completed": false,
+        "status": "completed",
+        "completed": true,
         "repeat": "none"
     },
     {
@@ -94,8 +94,30 @@
         "created_at": "2026-08-02T00:58:36.748637+05:30",
         "trigger_time": "2026-08-02T01:08:36.748566+05:30",
         "timezone": "Asia/Kolkata",
-        "status": "pending",
-        "completed": false,
+        "status": "completed",
+        "completed": true,
+        "repeat": "none"
+    },
+    {
+        "id": "cf98fca8-26b9-40c3-9236-e9fc96e6fc45",
+        "message": "tonight is a tv what s the name a er me more fix  boil milk",
+        "text": "tonight is a tv what s the name a er me more fix  boil milk",
+        "created_at": "2026-08-17T14:03:00.115519+05:30",
+        "trigger_time": "2026-08-17T14:08:00.084598+05:30",
+        "timezone": "Asia/Kolkata",
+        "status": "completed",
+        "completed": true,
+        "repeat": "none"
+    },
+    {
+        "id": "695d1a29-70f0-4742-9312-ef92befee5c4",
+        "message": "charge my phone",
+        "text": "charge my phone",
+        "created_at": "2026-08-17T14:38:06.351101+05:30",
+        "trigger_time": "2026-08-17T14:43:06.351000+05:30",
+        "timezone": "Asia/Kolkata",
+        "status": "completed",
+        "completed": true,
         "repeat": "none"
     }
 ]

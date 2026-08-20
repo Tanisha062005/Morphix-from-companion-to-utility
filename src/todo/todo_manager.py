@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional
+from rapidfuzz import fuzz
 
 from src.todo.todo_models import TodoItem
 
@@ -45,7 +46,7 @@ class TodoManager:
             p = Path(file_path)
             self.file_path: Path = p if p.is_absolute() else self.project_root / p
         else:
-            self.file_path: Path = self.project_root / "storage" / "todo.json"
+            self.file_path: Path = self.project_root / "data" / "todos.json"
 
         self.tasks: List[TodoItem] = []
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -289,14 +290,144 @@ class TodoManager:
         logger.info("Cleared all %d tasks from todo list.", count)
         return count
 
-    # Alias Methods to support Part 3 architecture
-    def add_todo(self, task_text: str) -> Dict[str, Any]:
-        """Alias for add_task."""
-        return self.add_task(task_text)
+    # Core Methods to support Part 3 architecture
+    def add_todo(self, task_text: str) -> str:
+        """
+        Creates and stores a new To-Do task.
+        Prevents adding case-insensitive duplicate pending tasks.
 
-    def delete_todo(self, query: str) -> Optional[Dict[str, Any]]:
-        """Alias for delete_task."""
-        return self.delete_task(query)
+        :param task_text: Task description string.
+        :return: Confirmation string.
+        :raises ValueError: If duplicate pending task description exists.
+        """
+        res = self.add_task(task_text)
+        return f"Added '{res['task']}' to your todo list."
+
+    def get_pending_todos(self) -> List[str]:
+        """
+        Returns list of pending task strings.
+
+        :return: List of uncompleted task strings.
+        """
+        return [t.task for t in self.tasks if not t.completed]
+
+    def delete_todo(self, query: str) -> bool:
+        """
+        Deletes a task matching description string query safely using substring/fuzzy matching.
+
+        :param query: Task description or ID query string.
+        :return: True if found and deleted, False otherwise.
+        """
+        if not query:
+            return False
+
+        clean_query = query.strip().lower()
+        matched_task = None
+
+        # Helper for word-level substring matching to prevent partial-word matches
+        def is_word_substring(q: str, t: str) -> bool:
+            q_words = q.split()
+            t_words = t.split()
+            if not q_words or not t_words:
+                return False
+            n, m = len(q_words), len(t_words)
+            for idx in range(m - n + 1):
+                if t_words[idx:idx+n] == q_words:
+                    return True
+            return False
+
+        # 1. Match by direct UUID first (case-insensitive)
+        for t in self.tasks:
+            if t.id.lower() == clean_query:
+                matched_task = t
+                break
+
+        # 2. Exact case-insensitive normalized match (pending first)
+        if not matched_task:
+            norm_query = " ".join(clean_query.split())
+            for t in self.tasks:
+                if not t.completed:
+                    norm_task = " ".join(t.task.strip().lower().split())
+                    if norm_task == norm_query:
+                        matched_task = t
+                        break
+
+        # 3. Substring match (pending first, using word-level boundaries)
+        if not matched_task:
+            for t in self.tasks:
+                if not t.completed:
+                    norm_task = " ".join(t.task.strip().lower().split())
+                    if is_word_substring(norm_query, norm_task):
+                        matched_task = t
+                        break
+
+        # 4. Fuzzy match (pending first) using rapidfuzz
+        if not matched_task:
+            best_match = None
+            best_score = 0.0
+            for t in self.tasks:
+                if not t.completed:
+                    norm_task = " ".join(t.task.strip().lower().split())
+                    score = fuzz.ratio(norm_query, norm_task)
+                    if score > best_score:
+                        best_score = score
+                        best_match = t
+            if best_score >= 80.0:
+                matched_task = best_match
+
+        # 5. Exact match on completed tasks (fallback)
+        if not matched_task:
+            for t in self.tasks:
+                if t.completed:
+                    norm_task = " ".join(t.task.strip().lower().split())
+                    if norm_task == norm_query:
+                        matched_task = t
+                        break
+
+        # 6. Substring match on completed tasks (fallback, using word-level boundaries)
+        if not matched_task:
+            for t in self.tasks:
+                if t.completed:
+                    norm_task = " ".join(t.task.strip().lower().split())
+                    if is_word_substring(norm_query, norm_task):
+                        matched_task = t
+                        break
+
+        # 7. Fuzzy match on completed tasks (fallback)
+        if not matched_task:
+            best_match = None
+            best_score = 0.0
+            for t in self.tasks:
+                if t.completed:
+                    norm_task = " ".join(t.task.strip().lower().split())
+                    score = fuzz.ratio(norm_query, norm_task)
+                    if score > best_score:
+                        best_score = score
+                        best_match = t
+            if best_score >= 80.0:
+                matched_task = best_match
+
+        if matched_task:
+            self.tasks.remove(matched_task)
+            self._save()
+            logger.info("Deleted task: '%s'", matched_task.task)
+            return True
+
+        logger.info("No matching task found to delete for query: '%s'", query)
+        return False
+
+    def clear_all_todos(self) -> int:
+        """
+        Removes all pending tasks. Returns count of cleared items.
+
+        :return: Count of cleared tasks.
+        """
+        initial_count = len(self.tasks)
+        self.tasks = [t for t in self.tasks if t.completed]
+        cleared = initial_count - len(self.tasks)
+        self._save()
+        logger.info("Cleared all %d pending tasks.", cleared)
+        return cleared
 
     def edit_todo(self, query: str, new_task_text: str) -> Optional[Dict[str, Any]]:
         """Alias for edit_task."""

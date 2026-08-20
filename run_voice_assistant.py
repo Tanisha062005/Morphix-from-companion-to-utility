@@ -16,6 +16,7 @@ if sys.platform == "win32":
 import time
 import wave
 from typing import Any, Optional, Tuple
+import speech_recognition as sr
 
 
 # Ensure project root is in sys.path
@@ -41,6 +42,7 @@ VoiceAssistant = None
 WakeWordDetector = None
 OpenWakeWordEngine = None
 WakeWordManager = None
+groq_chat_mgr = None
 
 # Setup application logging
 logging.basicConfig(
@@ -86,6 +88,59 @@ def is_meaningful_speech(text: str) -> bool:
     return True
 
 
+def transcribe_with_google(wav_bytes: bytes) -> str:
+    """
+    Transcribes raw WAV bytes using Google Web Speech API (speech_recognition).
+    Attempts primary en-IN transcription, falling back to hi-IN on low confidence.
+    """
+    import speech_recognition as sr
+    import io
+    import logging
+
+    logger = logging.getLogger("VoiceAssistantApp.GoogleSTT")
+    recognizer = sr.Recognizer()
+    try:
+        wav_io = io.BytesIO(wav_bytes)
+        with sr.AudioFile(wav_io) as source:
+            audio_data = recognizer.record(source)
+
+        # Pass 1: Try en-IN primary recognition
+        try:
+            result = recognizer.recognize_google(audio_data, language="en-IN", show_all=True)
+            if isinstance(result, dict) and 'alternative' in result and len(result['alternative']) > 0:
+                best_alt = result['alternative'][0]
+                transcript = best_alt.get('transcript', '')
+                confidence = best_alt.get('confidence', 1.0)
+
+                # Fallback: if confidence is low, re-transcribe using hi-IN
+                if confidence < 0.65:
+                    logger.info("Google STT primary en-IN confidence %.2f below threshold (0.65). Falling back to hi-IN...", confidence)
+                    try:
+                        fallback_transcript = recognizer.recognize_google(audio_data, language="hi-IN")
+                        if fallback_transcript:
+                            return fallback_transcript
+                    except Exception:
+                        pass
+                return transcript
+            else:
+                # If no alternatives returned, fallback directly
+                return recognizer.recognize_google(audio_data, language="hi-IN")
+        except Exception as e:
+            # If primary recognition fails completely (e.g., non-English gibberish), try fallback to hi-IN
+            logger.warning("Google STT primary en-IN recognition failed, attempting fallback to hi-IN: %s", str(e))
+            return recognizer.recognize_google(audio_data, language="hi-IN")
+
+    except sr.UnknownValueError:
+        # Graceful handling: return empty text, silence hallucinations
+        return ""
+    except sr.RequestError as e:
+        logger.error("Google Speech Recognition RequestError: %s", e)
+        return ""
+    except Exception as e:
+        logger.error("Error during Google Speech Recognition: %s", e)
+        return ""
+
+
 class ContinuousMicrophoneStream:
     """
     Continuous microphone stream with a 500ms audio pre-roll ring buffer.
@@ -93,20 +148,23 @@ class ContinuousMicrophoneStream:
     pre-speech audio frames to live speech recordings.
     """
 
-    def __init__(self, sample_rate: int = 16000, blocksize: int = 1600, preroll_ms: int = 500) -> None:
+    def __init__(self, sample_rate: int = 16000, blocksize: int = 1600, preroll_ms: int = 500, sound_player: Optional[Any] = None) -> None:
         """
         Initializes continuous microphone stream and ring buffer.
 
         :param sample_rate: Audio sampling rate in Hz (default: 16000 Hz).
         :param blocksize: Audio buffer block size in samples (default: 1600).
         :param preroll_ms: Duration of pre-speech audio ring buffer in milliseconds (default: 500 ms).
+        :param sound_player: Optional SoundPlayer instance to check if bark is playing.
         """
         self.sample_rate: int = sample_rate
         self.channels: int = 1
         self.blocksize: int = blocksize
         self.preroll_ms: int = preroll_ms
+        self.sound_player: Optional[Any] = sound_player
 
-        max_blocks = max(3, int((preroll_ms / 1000.0) * (sample_rate / blocksize)))
+        # Large ring buffer (4 seconds) to support sliding window wake-word detection
+        max_blocks = int((4000 / 1000.0) * (sample_rate / blocksize))
         self.ring_buffer: collections.deque = collections.deque(maxlen=max_blocks)
 
         self._stream = None
@@ -117,7 +175,25 @@ class ContinuousMicrophoneStream:
         """Internal sounddevice stream callback."""
         if status:
             logger.debug("Audio stream callback status: %s", status)
-        data = indata.tobytes()
+        
+        # Check if the bark sound is playing to discard input and prevent hearing itself
+        is_bark_playing = False
+        if self.sound_player:
+            is_bark_playing = self.sound_player.is_playing()
+        else:
+            try:
+                import pygame
+                if pygame.mixer.get_init() and pygame.mixer.get_busy():
+                    is_bark_playing = True
+            except Exception:
+                pass
+
+        if is_bark_playing:
+            # Overwrite with silent bytes to preserve timing
+            data = b"\x00" * len(indata.tobytes())
+        else:
+            data = indata.tobytes()
+
         self.ring_buffer.append(data)
         if self.recording_queue is not None:
             self.recording_queue.put(data)
@@ -144,6 +220,36 @@ class ContinuousMicrophoneStream:
                 return False
         return True
 
+    def clear(self) -> None:
+        """Clears the audio ring buffer."""
+        self.ring_buffer.clear()
+
+    def get_last_n_seconds(self, seconds: float = 3.0) -> bytes:
+        """
+        Extracts the latest `seconds` of audio from the ring buffer and returns it as WAV bytes.
+        """
+        # Determine how many bytes represent `seconds`
+        # 16000 samples/sec * 2 bytes/sample = 32000 bytes/sec
+        bytes_needed = int(seconds * self.sample_rate * 2)
+        
+        # Get all raw PCM blocks currently in the ring buffer
+        all_blocks = list(self.ring_buffer)
+        raw_pcm = b"".join(all_blocks)
+        
+        # Take the tail of the buffer up to bytes_needed
+        if len(raw_pcm) > bytes_needed:
+            raw_pcm = raw_pcm[-bytes_needed:]
+            
+        # Wrap in WAV format
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wf:
+            wf.setnchannels(self.channels)
+            wf.setsampwidth(2)
+            wf.setframerate(self.sample_rate)
+            wf.writeframes(raw_pcm)
+            
+        return wav_buffer.getvalue()
+
     def record_chunk_with_preroll(self, duration: float = 3.0) -> Tuple[bytes, float, float]:
         """
         Retrieves pre-speech buffer (500ms) combined with live recorded audio frames.
@@ -154,7 +260,10 @@ class ContinuousMicrophoneStream:
         if debug_pipeline:
             logger.info("[DIAGNOSTIC] Recording start timestamp: %.3f (%s)", speech_start_time, time.strftime('%H:%M:%S', time.localtime(speech_start_time)))
 
-        preroll_pcm = b"".join(list(self.ring_buffer))
+        # Slice only the requested pre-roll duration (500ms) from the ring buffer
+        preroll_bytes = int((self.preroll_ms / 1000.0) * self.sample_rate * 2)
+        all_preroll = b"".join(list(self.ring_buffer))
+        preroll_pcm = all_preroll[-preroll_bytes:] if len(all_preroll) > preroll_bytes else all_preroll
 
         self.recording_queue = queue.Queue()
 
@@ -215,6 +324,25 @@ class ContinuousMicrophoneStream:
                 logger.error("Error stopping microphone stream: %s", str(e))
 
 
+def strip_wake_prefix(text: str) -> str:
+    """
+    Strips common wake phrase prefixes from the beginning of the text
+    to make rule-based parsing matching more robust.
+    """
+    lowercased = text.lower().strip()
+    prefixes = [
+        "morphix ", "hey morphix ", "hello morphix ",
+        "hi morphix ", "wake up morphix ", "hey morfix ",
+        "hello morfix ", "morphics ", "hey morphics ",
+        "he might fix ", "hey more fix ", "hey more pics ",
+        "more fix "
+    ]
+    for prefix in prefixes:
+        if lowercased.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text.strip()
+
+
 def record_command_with_vad(
     mic_stream: ContinuousMicrophoneStream,
     stt: SpeechToText,
@@ -257,7 +385,8 @@ def record_command_with_vad(
         logger.info("[DIAGNOSTIC] Recording queue warmup time: %.4f seconds", warmup_duration)
 
     logger.info("Command started (Waiting for speech...)")
-    print("Waiting for speech activity...")
+    if debug_pipeline:
+        print("Waiting for speech activity...")
 
     start_time = time.time()
     last_speech_time = time.time()
@@ -314,7 +443,8 @@ def record_command_with_vad(
                     if debug_pipeline:
                         logger.info("[DIAGNOSTIC] VAD trigger timestamp: %.3f (%s)", vad_trigger_time, time.strftime('%H:%M:%S', time.localtime(vad_trigger_time)))
                     logger.info("Speech detected! Recording started.")
-                    print("Recording...")
+                    if debug_pipeline:
+                        print("Recording...")
                     start_time = time.time()
                 
                 last_speech_time = time.time()
@@ -343,15 +473,18 @@ def record_command_with_vad(
             logger.info("[DIAGNOSTIC] Silence duration: %.2f seconds", silence_duration)
             logger.info("[DIAGNOSTIC] Average RMS: %.2f", np.mean(rms_list) if rms_list else 0.0)
             logger.info("[DIAGNOSTIC] Peak RMS: %.2f", np.max(rms_list) if rms_list else 0.0)
-        print("Recording stopped")
+        if debug_pipeline:
+            print("Recording stopped")
 
     if not speech_started:
         return None, "", False
 
     logger.info("Transcribing recording...")
 
-    # Prepend pre-roll ring buffer
-    preroll_pcm = b"".join(list(mic_stream.ring_buffer))
+    # Prepend pre-roll ring buffer (sliced to preroll_ms)
+    preroll_bytes = int((mic_stream.preroll_ms / 1000.0) * mic_stream.sample_rate * 2)
+    all_preroll = b"".join(list(mic_stream.ring_buffer))
+    preroll_pcm = all_preroll[-preroll_bytes:] if len(all_preroll) > preroll_bytes else all_preroll
     full_pcm = preroll_pcm + b"".join(accumulated_blocks)
 
     recording_duration = time.time() - start_time
@@ -363,12 +496,14 @@ def record_command_with_vad(
         wf.writeframes(full_pcm)
 
     final_wav_bytes = wav_buffer.getvalue()
-    final_sentence = stt.transcribe(final_wav_bytes)
+    # Always use Google STT — no local model required
+    final_sentence = transcribe_with_google(final_wav_bytes)
 
-    print(f"Recording duration: {recording_duration:.2f}s")
-    print(f"Silence duration: {silence_duration:.2f}s")
+    if debug_pipeline:
+        print(f"Recording duration: {recording_duration:.2f}s")
+        print(f"Silence duration: {silence_duration:.2f}s")
 
-    logger.info("Final:\n%s", final_sentence)
+    logger.info("Final transcript: %s", final_sentence)
     logger.info("Recording Duration: %.2f seconds", recording_duration)
     logger.info("Silence Duration: %.2f seconds", silence_duration)
 
@@ -395,8 +530,28 @@ def handle_incoming_command(
     import time
     from src.gemini.gemini_logger import log_gemini_event
 
+    # Strip wake phrase prefix (e.g. "Morphix remind me to...")
+    cleaned_command = strip_wake_prefix(cleaned_command)
+
+    # Language detection
+    detected_lang = "English"
+    if any('\u0900' <= char <= '\u097F' for char in cleaned_command):
+        detected_lang = "Hindi"
+    else:
+        # Check Hinglish keywords
+        hinglish_keywords = {
+            "mujhe", "mera", "mere", "yaad", "dilana", "remind", "karna", "karo",
+            "hata", "daal", "mein", "dikhao", "batao", "kya", "hai", "saare", "kar", "todo"
+        }
+        import re
+        words = set(re.findall(r'\b\w+\b', cleaned_command.lower()))
+        if words & hinglish_keywords:
+            detected_lang = "Hinglish"
+
+    print(f"[Morphix] 🌐 Detected Language: {detected_lang}")
+
     # 1. Prioritize Gemini NLU if active and available
-    if router and router.is_available():
+    if getattr(Config, "GEMINI_ENABLED", False) and router and router.is_available():
         try:
             start_time = time.time()
             gemini_engine = ai_registry.get_provider("Gemini")
@@ -418,7 +573,7 @@ def handle_incoming_command(
                     except Exception as ex:
                         logger.warning("Sound playback failed for Gemini route: %s", str(ex))
                         
-                print(f"Assistant Response: {response}")
+                print(f"[Morphix] 🤖 Response: {response}")
                 try:
                     tts.speak(response)
                 except Exception as ex:
@@ -427,64 +582,76 @@ def handle_incoming_command(
         except Exception as ex:
             logger.error("Gemini Brain processing failed: %s. Falling back to local defaults.", str(ex))
 
-    # 2. Fallback to local reminder parser if Gemini NLU is unavailable or returned UNKNOWN
-    parsed_reminder = ReminderIntentParser.parse(cleaned_command)
-    if parsed_reminder and parsed_reminder.get("intent") == "SET_REMINDER":
-        message = parsed_reminder.get("message", "")
-        time_expr = parsed_reminder.get("time_expr", "")
-        reminder_mgr.add_reminder(message, time_expr)
-        
+    # 2. Step 1: Check Local Plugins (TodoIntentPlugin, ReminderIntentPlugin via intent_classifier)
+    result = intent_classifier.classify(cleaned_command)
+    
+    if result and result.intent != IntentType.UNKNOWN and result.confidence >= 0.7:
+        print("[Morphix] 🌐 Mode: LOCAL INTENT")
         log_gemini_event(
             request_type="intent",
-            intent="SET_REMINDER",
+            intent=result.intent.value,
             latency=0.0,
             success=True,
-            model_name="local-parser",
-            source="LOCAL"
-        )
-        logger.info(
-            "[NLU LOG] Raw: '%s' | Cleaned: '%s' | Intent: 'SET_REMINDER' | Source: LOCAL | Latency: 0.000s",
-            raw_transcript, cleaned_command
-        )
-        try:
-            tts.speak("Reminder saved.")
-        except Exception as ex:
-            logger.warning("TTS failed: %s", str(ex))
-        return
-
-    # 3. Fallback to local todo parser if Gemini NLU is unavailable or returned UNKNOWN
-    parsed_todo = TodoParser.parse(cleaned_command)
-    if parsed_todo and parsed_todo.get("intent") != "UNKNOWN":
-        log_gemini_event(
-            request_type="intent",
-            intent=parsed_todo.get("intent"),
-            latency=0.0,
-            success=True,
-            model_name="local-parser",
+            model_name="local-classifier",
             source="LOCAL"
         )
         logger.info(
             "[NLU LOG] Raw: '%s' | Cleaned: '%s' | Intent: '%s' | Source: LOCAL | Latency: 0.000s",
-            raw_transcript, cleaned_command, parsed_todo.get("intent")
+            raw_transcript, cleaned_command, result.intent.value
         )
-        process_todo_command(parsed_todo, todo_mgr, sound_player, wake_sound, tts)
+        
+        # Audio bark for todo/reminder additions/removals/etc.
+        if result.intent in [
+            IntentType.ADD_TODO, IntentType.DELETE_TODO, IntentType.COMPLETE_TODO,
+            IntentType.CLEAR_TODO, IntentType.ADD_REMINDER, IntentType.DELETE_REMINDER
+        ]:
+            try:
+                sound_player.play_sound(wake_sound)
+            except Exception as ex:
+                logger.warning("Sound playback failed: %s", str(ex))
+
+        # Check if it is a To-Do intent or a Reminder intent
+        is_todo_intent = result.intent in [
+            IntentType.ADD_TODO, IntentType.SHOW_TODO, IntentType.COMPLETE_TODO,
+            IntentType.DELETE_TODO, IntentType.CLEAR_TODO
+        ]
+        
+        if is_todo_intent:
+            parsed_todo = {
+                "intent": result.intent.value,
+                "item": result.parameters.get("task", ""),
+                "old_item": result.parameters.get("old_item", ""),
+                "new_item": result.parameters.get("new_item", "")
+            }
+            process_todo_command(parsed_todo, todo_mgr, sound_player, wake_sound, tts)
+        else:
+            response = process_voice_command(
+                command_text=cleaned_command,
+                intent_classifier=intent_classifier,
+                todo_mgr=todo_mgr,
+                reminder_mgr=reminder_mgr,
+                tts=tts
+            )
         return
 
-    # 4. Fallback to legacy plugin system
-    result = intent_classifier.classify(cleaned_command)
-    intent = result.intent.value
-    logger.info(
-        "[NLU LOG] Raw: '%s' | Cleaned: '%s' | Intent: '%s' | Source: LOCAL | Latency: 0.000s",
-        raw_transcript, cleaned_command, intent
-    )
-    response = process_voice_command(
-        command_text=cleaned_command,
-        intent_classifier=intent_classifier,
-        todo_mgr=todo_mgr,
-        reminder_mgr=reminder_mgr,
-        tts=tts
-    )
-    print(f"Assistant Response: {response}")
+    # 3. Step 2: If NO local plugin matches (Unclassified / General Chat) -> Send to Groq Chat
+    print("[Morphix] 🌐 Mode: GROQ AI")
+    try:
+        from src.ai.groq_chat import GroqChatManager
+        global groq_chat_mgr
+        if 'groq_chat_mgr' not in globals() or groq_chat_mgr is None:
+            groq_chat_mgr = GroqChatManager()
+
+        response = groq_chat_mgr.chat(cleaned_command)
+    except Exception as ex:
+        logger.error("Failed to run GroqChatManager: %s", str(ex))
+        response = "Sorry, I had a glitch processing that!"
+
+    print(f"[Morphix] 🤖 Response: {response}")
+    try:
+        tts.speak(response)
+    except Exception as ex:
+        logger.warning("TTS speaking failed for Groq: %s", str(ex))
 
 
 def process_todo_command(
@@ -495,7 +662,7 @@ def process_todo_command(
     tts: TextToSpeech
 ) -> bool:
     """
-    Executes the Todo operation, plays a bark sound, and speaks the confirmation via Piper TTS.
+    Executes the Todo operation, plays a bark sound, and speaks the confirmation via Edge TTS (Aarti).
     Returns True if processed successfully, False if intent was UNKNOWN.
     """
     intent = parsed_todo.get("intent", "UNKNOWN")
@@ -516,14 +683,13 @@ def process_todo_command(
     response = ""
     if intent == "ADD_TODO":
         try:
-            todo_mgr.add_todo(item)
-            response = "Todo added."
+            response = todo_mgr.add_todo(item)
         except ValueError:
             response = "Task already exists."
     elif intent == "DELETE_TODO":
         deleted = todo_mgr.delete_todo(item)
         if deleted:
-            response = "Todo deleted."
+            response = f"Removed {item} from your todo list."
         else:
             response = "Todo not found."
     elif intent == "COMPLETE_TODO":
@@ -539,16 +705,21 @@ def process_todo_command(
         else:
             response = "Todo not found."
     elif intent == "SHOW_TODO":
-        pending = todo_mgr.get_pending_tasks()
+        pending = todo_mgr.get_pending_todos()
         if not pending:
-            response = "Todo list is empty."
+            response = "Your todo list is empty!"
         else:
-            task_list_str = ", ".join(f"{i+1}. {t.get('task')}" for i, t in enumerate(pending))
-            response = f"You have {len(pending)} pending tasks: {task_list_str}."
+            task_list_str = ", ".join(f"{i+1}. {t}" for i, t in enumerate(pending))
+            if len(pending) == 1:
+                response = f"You have 1 pending task: {task_list_str}."
+            else:
+                response = f"You have {len(pending)} pending tasks: {task_list_str}."
+    elif intent == "CLEAR_TODO":
+        todo_mgr.clear_all_todos()
+        response = "All tasks have been cleared from your todo list."
 
-    print(f"Assistant Response: {response}")
-
-    # 3. Speak via Piper TTS
+    # 3. Speak via Edge TTS (Aarti)
+    print(f"[Morphix] 🤖 Response: {response}")
     try:
         tts.speak(response)
     except Exception as ex:
@@ -566,7 +737,7 @@ def process_voice_command(
 ) -> str:
     """
     Processes recognized voice command text through IntentClassifier,
-    executes matching Todo/Reminder manager operation, and speaks Piper TTS response.
+    executes matching Todo/Reminder manager operation, and speaks Edge TTS (Aarti) response.
 
     :return: Spoken response string.
     """
@@ -645,7 +816,8 @@ def process_voice_command(
     else:
         response = "I'm not sure how to do that yet."
 
-    logger.info("Piper speaking response: '%s'", response)
+    logger.info("Speaking response: '%s'", response)
+    print(f"[Morphix] 🤖 Response: {response}")
     tts.speak(response)
     return response
 
@@ -654,7 +826,7 @@ def main() -> None:
     """
     Main application entrypoint for Morphix Voice Assistant.
     Coordinates continuous pre-buffered microphone stream, RapidFuzz wake word matching,
-    Intent classification, offline Todo & Reminder management, and Piper TTS voice responses.
+    Intent classification, offline Todo & Reminder management, and Edge TTS (Aarti) voice responses.
 
     Supports Config.DEVELOPMENT_MODE = True to bypass wake-word requirement during dev phases.
     """
@@ -672,7 +844,7 @@ def main() -> None:
     # Declare globals and import modules so they receive loaded environment variables
     global Config, SoundPlayer, IntentClassifier, IntentType, ReminderChecker, ReminderManager
     global TodoManager, TranscriptCleaner, ReminderIntentParser, TodoParser, AIRegistry
-    global SpeechToText, TextToSpeech, VoiceAssistant, WakeWordDetector, OpenWakeWordEngine, WakeWordManager
+    global SpeechToText, TextToSpeech, VoiceAssistant, WakeWordDetector, OpenWakeWordEngine, WakeWordManager, groq_chat_mgr
 
     from config import Config
     from src.audio.sound_player import SoundPlayer
@@ -682,7 +854,7 @@ def main() -> None:
     from src.todo.todo_manager import TodoManager
     from src.nlp.transcript_cleaner import TranscriptCleaner
     from src.intent.reminder_parser import ReminderIntentParser
-    from src.todo.todo_parser import TodoParser
+    from src.intent.todo_intent import TodoIntentParser as TodoParser
     from src.ai.ai_registry import AIRegistry
     from src.voice.speech_to_text import SpeechToText
     from src.voice.text_to_speech import TextToSpeech
@@ -726,13 +898,13 @@ def main() -> None:
         print(f"Gemini: Disabled — {reason}")
         if api_key and not is_valid:
             print("  → Get a valid API key at: https://aistudio.google.com/app/apikey")
-            print("  → Place it in your .env file as: GEMINI_API_KEY=AIzaSy...")
     print("==================================================")
 
     transition_state(AssistantState.INITIALIZING)
     print("Initializing components...")
 
     dev_mode = getattr(Config, "DEVELOPMENT_MODE", False)
+    debug_pipeline = getattr(Config, "DEBUG_AUDIO_PIPELINE", False)
 
     sound_player = SoundPlayer()
     tts = TextToSpeech()
@@ -780,7 +952,7 @@ def main() -> None:
     reminder_checker.start()
 
     # Initialize continuous microphone stream with 500ms pre-roll
-    mic_stream = ContinuousMicrophoneStream(sample_rate=16000, blocksize=1600, preroll_ms=500)
+    mic_stream = ContinuousMicrophoneStream(sample_rate=16000, blocksize=1600, preroll_ms=500, sound_player=sound_player)
     if not mic_stream.start():
         logger.error("Unable to initialize continuous microphone stream. Exiting.")
         sys.exit(1)
@@ -798,7 +970,7 @@ def main() -> None:
     if dev_mode:
         print("\n--------------------------------------------------")
         print("  NOTICE: DEVELOPMENT MODE ACTIVE (Wake-Word Bypassed)")
-        print("  Workflow: Bark Sound -> Piper Greeting -> Continuous Command Loop")
+        print("  Workflow: Bark Sound -> Edge TTS Greeting -> Continuous Command Loop")
         print("--------------------------------------------------\n")
 
         try:
@@ -807,31 +979,22 @@ def main() -> None:
             logger.info("Active Mode Started")
 
             try:
-                sound_player.play_sound(wake_sound)
+                sound_player.play_sound(wake_sound, blocking=False)
             except Exception as ex:
                 logger.warning("Sound playback skipped or unavailable: %s", str(ex))
-
-            try:
-                import random
-                import sys
-                is_testing = "unittest" in sys.modules or "pytest" in sys.modules
-                if is_testing:
-                    chosen_greeting = greeting_msg
-                else:
-                    greetings = ["Listening.", "Woof!", "Yes?", "I'm here.", "How can I help you?", "At your service.", "Yes, Tanisha?"]
-                    chosen_greeting = random.choice(greetings)
-                tts.speak(chosen_greeting)
-            except Exception as ex:
-                logger.warning("TTS greeting failed: %s", str(ex))
 
             print("Voice Assistant Ready (Development Mode).")
             print("Press Ctrl+C at any time to stop.\n")
 
-            active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 300)
+            active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 20.0)
             last_speech_time = time.time()
 
+            # For dev mode, simulate bark play and listen status print
+            print("[Morphix] 🐶 Bark! Active listening (20s window)...")
+
             while True:
-                print("\nNow listening for command...")
+                if debug_pipeline:
+                    print("\nNow listening for command...")
                 command_wav, recognized_command, timeout_reached = record_command_with_vad(
                     mic_stream=mic_stream,
                     stt=stt,
@@ -844,13 +1007,13 @@ def main() -> None:
 
                 if timeout_reached:
                     transition_state(AssistantState.WAIT_WAKE)
+                    print("[Morphix] 😴 Waiting for wake word...")
                     break
-
 
                 cleaned_command = TranscriptCleaner.clean(recognized_command)
                 if is_meaningful_speech(cleaned_command):
                     transition_state(AssistantState.COMMAND_RECEIVED)
-                    print(f"\nCleaned Command: {cleaned_command}\n")
+                    print(f"[Morphix] 👂 Heard: {cleaned_command}")
 
                     handle_incoming_command(
                         cleaned_command=cleaned_command,
@@ -867,6 +1030,7 @@ def main() -> None:
 
                     last_speech_time = time.time()
                     transition_state(AssistantState.ACTIVE_MODE)
+                    print("[Morphix] 🐶 Bark! Active listening (20s window)...")
                 else:
                     logger.info("No speech command detected.")
 
@@ -897,93 +1061,95 @@ def main() -> None:
 
         wake_word_manager.start()
 
+        # Clear ring buffer to start fresh
+        mic_stream.clear()
+
+        last_check_time = time.time()
+        transition_state(AssistantState.WAIT_WAKE)
+        print("[Morphix] 😴 Waiting for wake word...")
+
         try:
             while True:
-                transition_state(AssistantState.WAIT_WAKE)
-                print("Waiting for wake word...")
-                print("Listening...")
+                current_time = time.time()
+                # Run sliding window wake word checking every 0.8 seconds
+                if current_time - last_check_time >= 0.8:
+                    last_check_time = current_time
 
-                wav_bytes, start_t, end_t = mic_stream.record_chunk_with_preroll(duration=3.0)
-                if not wav_bytes:
-                    time.sleep(0.1)
-                    continue
+                    # Extract the latest 3.0 seconds from the ring buffer
+                    wav_bytes = mic_stream.get_last_n_seconds(seconds=3.0)
 
-                is_wake = wake_word_manager.detect(wav_bytes)
-                if is_wake:
-                    logger.info("Wake phrase detected at timestamp: %.3f", start_t)
+                    # Only run detection if we have acquired enough audio
+                    if len(wav_bytes) > 1000:
+                        is_wake = wake_word_manager.detect(wav_bytes)
+                        if is_wake:
+                            logger.info("Wake phrase detected!")
 
-                    # Play bark
-                    try:
-                        sound_player.play_sound(wake_sound)
-                    except Exception as ex:
-                        logger.warning("Sound playback skipped or unavailable: %s", str(ex))
+                            # Flush the buffer to prevent immediate duplicate triggers
+                            mic_stream.clear()
 
-                    # Speak random greeting response
-                    try:
-                        import random
-                        import sys
-                        is_testing = "unittest" in sys.modules or "pytest" in sys.modules
-                        if is_testing:
-                            chosen_greeting = greeting_msg
-                        else:
-                            greetings = ["Listening.", "Woof!", "Yes?", "I'm here.", "How can I help you?", "At your service.", "Yes, Tanisha?"]
-                            chosen_greeting = random.choice(greetings)
-                        tts.speak(chosen_greeting)
-                    except Exception as ex:
-                        logger.warning("TTS greeting failed: %s", str(ex))
+                            # Play the dog bark sound (.wav) immediately via SoundPlayer asynchronously
+                            try:
+                                sound_player.play_sound(wake_sound, blocking=False)
+                            except Exception as ex:
+                                logger.warning("Sound playback skipped or unavailable: %s", str(ex))
 
-                    # Enter ACTIVE MODE
-                    transition_state(AssistantState.ACTIVE_MODE)
-                    logger.info("Active Mode Started")
+                            print("[Morphix] 🐶 Bark! Active listening (20s window)...")
 
-                    active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 300)
-                    last_speech_time = time.time()
-
-                    while True:
-                        print("\nNow listening for command...")
-                        command_wav, recognized_command, timeout_reached = record_command_with_vad(
-                            mic_stream=mic_stream,
-                            stt=stt,
-                            max_duration=10.0,
-                            silence_timeout=1.5,
-                            post_tts_pause_ms=200,
-                            active_timeout=active_timeout,
-                            last_speech_time_ref=last_speech_time
-                        )
-
-                        if timeout_reached:
-                            transition_state(AssistantState.SLEEP)
-                            break
-
-
-                        cleaned_command = TranscriptCleaner.clean(recognized_command)
-                        if is_meaningful_speech(cleaned_command):
-                            transition_state(AssistantState.COMMAND_RECEIVED)
-                            print(f"\nCleaned Command: {cleaned_command}\n")
-
-                            handle_incoming_command(
-                                cleaned_command=cleaned_command,
-                                raw_transcript=recognized_command,
-                                reminder_mgr=reminder_mgr,
-                                todo_mgr=todo_mgr,
-                                sound_player=sound_player,
-                                wake_sound=wake_sound,
-                                tts=tts,
-                                router=router,
-                                ai_registry=ai_registry,
-                                intent_classifier=intent_classifier
-                            )
-
-                            last_speech_time = time.time()
+                            # Standard Active mode (listens for 20 seconds for a command)
                             transition_state(AssistantState.ACTIVE_MODE)
-                        else:
-                            logger.info("No speech command detected.")
+                            logger.info("Active Mode Started")
 
-                        time.sleep(0.1)
-                else:
-                    logger.info("Wake phrase similarity below threshold. Continuing to listen...")
+                            active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 20.0)
+                            last_speech_time = time.time()
 
-                time.sleep(0.1)
+                            while True:
+                                if debug_pipeline:
+                                    print("\nNow listening for command...")
+                                command_wav, recognized_command, timeout_reached = record_command_with_vad(
+                                    mic_stream=mic_stream,
+                                    stt=stt,
+                                    max_duration=10.0,
+                                    silence_timeout=1.5,
+                                    post_tts_pause_ms=200,
+                                    active_timeout=active_timeout,
+                                    last_speech_time_ref=last_speech_time
+                                )
+
+                                if timeout_reached:
+                                    logger.info("Active mode timeout reached. Transitioning to Sleep/Idle.")
+                                    break
+
+                                cleaned_command = TranscriptCleaner.clean(recognized_command)
+                                if is_meaningful_speech(cleaned_command):
+                                    transition_state(AssistantState.COMMAND_RECEIVED)
+                                    print(f"[Morphix] 👂 Heard: {cleaned_command}")
+
+                                    handle_incoming_command(
+                                        cleaned_command=cleaned_command,
+                                        raw_transcript=recognized_command,
+                                        reminder_mgr=reminder_mgr,
+                                        todo_mgr=todo_mgr,
+                                        sound_player=sound_player,
+                                        wake_sound=wake_sound,
+                                        tts=tts,
+                                        router=router,
+                                        ai_registry=ai_registry,
+                                        intent_classifier=intent_classifier
+                                    )
+
+                                    last_speech_time = time.time()
+                                    transition_state(AssistantState.ACTIVE_MODE)
+                                    print("[Morphix] 🐶 Bark! Active listening (20s window)...")
+                                else:
+                                    logger.info("No speech command detected.")
+
+                                time.sleep(0.1)
+
+                            # Seamlessly transition back to continuous WAIT_WAKE streaming
+                            transition_state(AssistantState.WAIT_WAKE)
+                            print("[Morphix] 😴 Waiting for wake word...")
+                            mic_stream.clear()
+                            last_check_time = time.time()
 
         except KeyboardInterrupt:
             reminder_checker.stop()

@@ -25,6 +25,14 @@ class TranscriptCleaner:
         "forty": "40", "fifty": "50", "sixty": "60"
     }
 
+    DEVANAGARI_MAPS = {
+        "रिमाइंड": "remind",
+        "रिमाइंडर": "remind",
+        "ऐड": "add",
+        "टूडू": "todo",
+        "टू-डू": "todo"
+    }
+
     @classmethod
     def clean(cls, text: str) -> str:
         """
@@ -40,16 +48,18 @@ class TranscriptCleaner:
         cleaned = text.lower()
 
         # 2. Punctuation normalization (replace with spaces)
-        cleaned = re.sub(r"[^\w\s-]", " ", cleaned)
+        cleaned = re.sub(r"[.,\/#!$%\^&\*;:{}=\-_`~()?'\"]", " ", cleaned)
 
         # 3. Replace common written phrases (e.g., 'to do' -> 'todo')
         cleaned = re.sub(r"\bto\s+do\b", "todo", cleaned)
 
-        # 4. Translate number words to digits
+        # 4. Translate number words to digits and Devanagari command words to English
         words = cleaned.split()
         normalized_words = []
         for word in words:
-            if word in cls.NUMBER_WORDS:
+            if word in cls.DEVANAGARI_MAPS:
+                normalized_words.append(cls.DEVANAGARI_MAPS[word])
+            elif word in cls.NUMBER_WORDS:
                 normalized_words.append(cls.NUMBER_WORDS[word])
             else:
                 normalized_words.append(word)
