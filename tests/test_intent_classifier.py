@@ -108,7 +108,7 @@ class TestIntentClassifier(unittest.TestCase):
 
     def test_unknown_intents(self) -> None:
         unknown_commands = [
-            "What is the weather today",
+            "Can you do a backflip",
             "Sing a song",
             "Tell me a joke",
             "Fly to Mars"

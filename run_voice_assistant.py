@@ -43,6 +43,7 @@ WakeWordDetector = None
 OpenWakeWordEngine = None
 WakeWordManager = None
 groq_chat_mgr = None
+eye_display = None   # EyeAnimatorThread instance (daemon, started in main())
 
 # Setup application logging
 logging.basicConfig(
@@ -361,6 +362,7 @@ def record_command_with_vad(
         5. Once speech starts, records until 1.5 seconds of silence or max_duration (10s) reached.
         6. Returns the complete transcribed string and timeout_reached flag.
     """
+    global eye_display
     import numpy as np
 
     recording_start_time = time.time()
@@ -403,21 +405,51 @@ def record_command_with_vad(
         while True:
             # Check timeout if speech has not started yet
             if not speech_started:
-                current_time = time.time()
-                elapsed_since_speech = current_time - last_speech_time_ref
-                remaining_time = max(0.0, active_timeout - elapsed_since_speech)
+                from src.intent.music_plugin import MusicService
+                is_music_active = False
+                try:
+                    is_music_active = MusicService.get_instance().is_playing()
+                except Exception:
+                    pass
 
-                # Log countdown status every 2 seconds
-                if current_time - last_log_time >= 2.0:
-                    last_speech_timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_speech_time_ref))
-                    logger.info("Last Speech Timestamp: %s", last_speech_timestamp)
-                    logger.info("Inactivity Timer: %.2f seconds", elapsed_since_speech)
-                    logger.info("Remaining Time: %.2f seconds", remaining_time)
-                    last_log_time = current_time
+                if is_music_active:
+                    # While music is streaming, freeze the 15-second sleep timer completely
+                    last_speech_time_ref = time.time()
+                    if eye_display is not None and eye_display.is_alive():
+                        try:
+                            from src.display.eye_animator import EyeState as _ES
+                            if eye_display.get_state() != _ES.MUSIC_MODE:
+                                track = MusicService.get_instance().get_now_playing()
+                                title = track.title if track else "Music"
+                                eye_display.set_music_data(title, is_playing=True)
+                                eye_display.set_state(_ES.MUSIC_MODE)
+                        except Exception:
+                            pass
+                else:
+                    current_time = time.time()
+                    elapsed_since_speech = current_time - last_speech_time_ref
+                    remaining_time = max(0.0, active_timeout - elapsed_since_speech)
 
-                if elapsed_since_speech >= active_timeout:
-                    logger.info("Returning to Sleep")
-                    return None, "", True
+                    # Inactivity: At 11.0s of continuous silence (elapsed >= 11.0s or remaining <= 4.0s), transition to SLEEPY
+                    if eye_display is not None and eye_display.is_alive():
+                        try:
+                            from src.display.eye_animator import EyeState as _ES
+                            if (elapsed_since_speech >= 11.0 or remaining_time <= 4.0) and eye_display.get_state() != _ES.SLEEPY:
+                                eye_display.set_state(_ES.SLEEPY)
+                        except Exception:
+                            pass
+
+                    # Log countdown status every 1.0 second
+                    if current_time - last_log_time >= 1.0:
+                        last_speech_timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_speech_time_ref))
+                        logger.info("Last Speech Timestamp: %s", last_speech_timestamp)
+                        logger.info("Inactivity Timer: %.2f seconds", elapsed_since_speech)
+                        logger.info("Remaining Time: %.2f seconds", remaining_time)
+                        last_log_time = current_time
+
+                    if elapsed_since_speech >= active_timeout:
+                        logger.info("Inactivity timeout (%.1fs) reached. Returning to Deep Sleep.", active_timeout)
+                        return None, "", True
 
             try:
                 block = mic_stream.recording_queue.get(timeout=0.5)
@@ -446,6 +478,12 @@ def record_command_with_vad(
                     if debug_pipeline:
                         print("Recording...")
                     start_time = time.time()
+                    if eye_display is not None and eye_display.is_alive():
+                        try:
+                            from src.display.eye_animator import EyeState as _ES
+                            eye_display.set_state(_ES.LISTENING)
+                        except Exception:
+                            pass
                 
                 last_speech_time = time.time()
                 silence_duration = 0.0
@@ -527,6 +565,7 @@ def handle_incoming_command(
     semantically and correct STT/Whisper transcription errors. Fallbacks to local regex
     parsers or legacy plugins are executed if Gemini is unavailable or unknown.
     """
+    global eye_display, groq_chat_mgr
     import time
     from src.gemini.gemini_logger import log_gemini_event
 
@@ -572,12 +611,24 @@ def handle_incoming_command(
                         sound_player.play_sound(wake_sound)
                     except Exception as ex:
                         logger.warning("Sound playback failed for Gemini route: %s", str(ex))
-                        
+                
                 print(f"[Morphix] 🤖 Response: {response}")
+                if eye_display is not None and eye_display.is_alive():
+                    try:
+                        from src.display.eye_animator import EyeState as _ES
+                        eye_display.set_state(_ES.SPEAKING)
+                    except Exception:
+                        pass
                 try:
                     tts.speak(response)
                 except Exception as ex:
                     logger.warning("TTS speaking failed for Gemini route: %s", str(ex))
+                if eye_display is not None and eye_display.is_alive():
+                    try:
+                        from src.display.eye_animator import EyeState as _ES
+                        eye_display.set_state(_ES.LISTENING)
+                    except Exception:
+                        pass
                 return
         except Exception as ex:
             logger.error("Gemini Brain processing failed: %s. Falling back to local defaults.", str(ex))
@@ -610,7 +661,267 @@ def handle_incoming_command(
             except Exception as ex:
                 logger.warning("Sound playback failed: %s", str(ex))
 
-        # Check if it is a To-Do intent or a Reminder intent
+        # Check if Music, Volume, Telemetry, Weather, To-Do or Reminder intent
+        is_hindi = (detected_lang in ("Hindi", "Hinglish")) or result.parameters.get("is_hindi", False)
+
+        # 1. Music Intents
+        if result.intent == IntentType.PLAY_MUSIC:
+            from src.intent.music_plugin import MusicService
+            ms = MusicService.get_instance()
+            query = result.parameters.get("query", "popular trending music")
+            title = query.title()
+            response = ms.format_speech_response("play", title=title, is_hindi=is_hindi)
+            print(f"[Morphix] 🎵 Music Query: {query}")
+            print(f"[Morphix] 🤖 Response: {response}")
+
+            def _on_music_started(track):
+                if eye_display is not None and eye_display.is_alive():
+                    try:
+                        from src.display.eye_animator import EyeState as _ES
+                        eye_display.set_music_data(track.title, is_playing=True)
+                        eye_display.set_state(_ES.MUSIC_MODE)
+                    except Exception:
+                        pass
+
+            # 1. Show SPEAKING eye and speak Aarti confirmation
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_music_data(title, is_playing=True)
+                    eye_display.set_state(_ES.SPEAKING)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception as ex:
+                logger.warning("TTS speaking failed for music: %s", str(ex))
+
+            # 2. Trigger asynchronous background stream
+            ms.play(query, on_started=_on_music_started)
+
+            # 3. Transition to MUSIC_MODE visualizer
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_music_data(title, is_playing=True)
+                    eye_display.set_state(_ES.MUSIC_MODE)
+                except Exception:
+                    pass
+            return
+
+        elif result.intent == IntentType.PAUSE_MUSIC:
+            from src.intent.music_plugin import MusicService
+            ms = MusicService.get_instance()
+            ms.pause()
+            response = ms.format_speech_response("pause", is_hindi=is_hindi)
+            print(f"[Morphix] 🤖 Response: {response}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.SPEAKING)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception:
+                pass
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.LISTENING)
+                except Exception:
+                    pass
+            return
+
+        elif result.intent == IntentType.RESUME_MUSIC:
+            from src.intent.music_plugin import MusicService
+            ms = MusicService.get_instance()
+            ms.resume()
+            response = ms.format_speech_response("resume", is_hindi=is_hindi)
+            print(f"[Morphix] 🤖 Response: {response}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.SPEAKING)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception:
+                pass
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    track = ms.get_now_playing()
+                    title = track.title if track else "Music"
+                    eye_display.set_music_data(title, is_playing=True)
+                    eye_display.set_state(_ES.MUSIC_MODE)
+                except Exception:
+                    pass
+            return
+
+        elif result.intent == IntentType.STOP_MUSIC:
+            from src.intent.music_plugin import MusicService
+            ms = MusicService.get_instance()
+            ms.stop()
+            response = ms.format_speech_response("stop", is_hindi=is_hindi)
+            print(f"[Morphix] 🤖 Response: {response}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.SPEAKING)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception:
+                pass
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.LISTENING)
+                except Exception:
+                    pass
+            return
+
+        elif result.intent == IntentType.NEXT_MUSIC:
+            from src.intent.music_plugin import MusicService
+            ms = MusicService.get_instance()
+            response = ms.format_speech_response("next", is_hindi=is_hindi)
+            print(f"[Morphix] 🤖 Response: {response}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.SPEAKING)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception:
+                pass
+
+            def _on_next_started(track):
+                if eye_display is not None and eye_display.is_alive():
+                    try:
+                        from src.display.eye_animator import EyeState as _ES
+                        eye_display.set_music_data(track.title, is_playing=True)
+                        eye_display.set_state(_ES.MUSIC_MODE)
+                    except Exception:
+                        pass
+
+            ms.play("popular trending songs", on_started=_on_next_started)
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_music_data("Next Track", is_playing=True)
+                    eye_display.set_state(_ES.MUSIC_MODE)
+                except Exception:
+                    pass
+            return
+
+        # 2. Volume Intents
+        elif result.intent in (
+            IntentType.SET_VOLUME, IntentType.INCREASE_VOLUME,
+            IntentType.DECREASE_VOLUME, IntentType.MUTE_VOLUME, IntentType.UNMUTE_VOLUME
+        ):
+            from src.intent.volume_plugin import VolumeService
+            vs = VolumeService.get_instance()
+            action = result.parameters.get("action", "set")
+            if result.intent == IntentType.SET_VOLUME:
+                level = result.parameters.get("level", 70)
+                new_vol = vs.set_volume(level)
+                response = vs.format_speech_response("set", level=new_vol, is_hindi=is_hindi)
+            elif result.intent == IntentType.INCREASE_VOLUME:
+                new_vol = vs.increase_volume(result.parameters.get("step", 15))
+                response = vs.format_speech_response("increase", level=new_vol, is_hindi=is_hindi)
+            elif result.intent == IntentType.DECREASE_VOLUME:
+                new_vol = vs.decrease_volume(result.parameters.get("step", 15))
+                response = vs.format_speech_response("decrease", level=new_vol, is_hindi=is_hindi)
+            elif result.intent == IntentType.MUTE_VOLUME:
+                vs.mute()
+                response = vs.format_speech_response("mute", is_hindi=is_hindi)
+            else:
+                new_vol = vs.get_volume()
+                vs.unmute()
+                response = vs.format_speech_response("unmute", level=new_vol, is_hindi=is_hindi)
+
+            print(f"[Morphix] 🔊 Volume: {vs.get_volume()}% ({action})")
+            print(f"[Morphix] 🤖 Response: {response}")
+            try:
+                tts.speak(response)
+            except Exception as ex:
+                logger.warning("TTS speaking failed for volume: %s", str(ex))
+            return
+
+        # 3. System Telemetry Intent
+        elif result.intent == IntentType.GET_SYSTEM_HEALTH:
+            from src.intent.system_health_plugin import SystemHealthService
+            shs = SystemHealthService.get_instance()
+            t_data = shs.get_telemetry()
+            response = shs.format_speech_response(t_data, is_hindi=is_hindi)
+            print(f"[Morphix] 🌡️ Telemetry: CPU {t_data['cpu']}% | RAM {t_data['ram']}% | Temp {t_data['temperature']}°C | Bat {t_data['battery']}%")
+            print(f"[Morphix] 🤖 Response: {response}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_telemetry_data(
+                        cpu=t_data["cpu"],
+                        ram=t_data["ram"],
+                        temp=t_data["temperature"],
+                        battery=t_data["battery"],
+                        is_charging=t_data["is_charging"],
+                        is_alert=t_data["is_thermal_alert"]
+                    )
+                    if t_data.get("is_thermal_alert", False):
+                        eye_display.set_state(_ES.SICK_COLD)
+                    else:
+                        eye_display.set_state(_ES.TELEMETRY_HUD)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception as ex:
+                logger.warning("TTS speaking failed for telemetry: %s", str(ex))
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.LISTENING)
+                except Exception:
+                    pass
+            return
+
+        # 4. Weather Intent
+        elif result.intent == IntentType.GET_WEATHER:
+            from src.intent.weather_plugin import WeatherService
+            ws = WeatherService.get_instance()
+            w_data = ws.get_weather()
+            response = ws.format_speech_response(w_data, is_hindi=is_hindi)
+            print(f"[Morphix] 🌦️ Weather Info: {w_data['city']} | {w_data['temperature']}°C | {w_data['description']}")
+            print(f"[Morphix] 🤖 Response: {response}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_weather_data(
+                        city=w_data['city'],
+                        temp=w_data['temperature'],
+                        condition=w_data['condition'],
+                        desc=w_data['description']
+                    )
+                    eye_display.set_state(_ES.WEATHER_HUD)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception as ex:
+                logger.warning("TTS speaking failed for weather: %s", str(ex))
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.LISTENING)
+                except Exception:
+                    pass
+            return
+
         is_todo_intent = result.intent in [
             IntentType.ADD_TODO, IntentType.SHOW_TODO, IntentType.COMPLETE_TODO,
             IntentType.DELETE_TODO, IntentType.CLEAR_TODO
@@ -638,11 +949,43 @@ def handle_incoming_command(
     print("[Morphix] 🌐 Mode: GROQ AI")
     try:
         from src.ai.groq_chat import GroqChatManager
-        global groq_chat_mgr
         if 'groq_chat_mgr' not in globals() or groq_chat_mgr is None:
             groq_chat_mgr = GroqChatManager()
 
-        response = groq_chat_mgr.chat(cleaned_command)
+        # Use emotion-tagged response when eye display is running
+        if eye_display is not None and eye_display.is_alive():
+            response, emotion_tag = groq_chat_mgr.chat_with_emotion(cleaned_command)
+            logger.info("Groq emotion tag: %s", emotion_tag)
+
+            # Smart Intent Rejector (Background / ambient chatter / third-person speech)
+            if emotion_tag == "IGNORE" or response.strip() in ("[IGNORE]", ""):
+                logger.info("[Morphix] 🔇 Ambient chatter / ignore tag detected from Groq. Skipping speech.")
+                try:
+                    from src.display.eye_animator import EyeState
+                    eye_display.set_state(EyeState.CONFUSED)
+                except Exception:
+                    pass
+                return
+
+            # Apply emotion expression during speaking
+            try:
+                from src.display.eye_animator import EyeState
+                if emotion_tag in EyeState.__members__:
+                    eye_display.set_state(EyeState[emotion_tag])
+                else:
+                    eye_display.set_state(EyeState.SPEAKING)
+            except Exception as ex:
+                logger.debug("Could not map emotion tag '%s': %s", emotion_tag, ex)
+                try:
+                    from src.display.eye_animator import EyeState
+                    eye_display.set_state(EyeState.SPEAKING)
+                except Exception:
+                    pass
+        else:
+            response = groq_chat_mgr.chat(cleaned_command)
+            if response.strip() == "[IGNORE]" or "[IGNORE]" in response:
+                logger.info("[Morphix] 🔇 Ambient chatter / ignore tag detected from Groq. Skipping speech.")
+                return
     except Exception as ex:
         logger.error("Failed to run GroqChatManager: %s", str(ex))
         response = "Sorry, I had a glitch processing that!"
@@ -652,6 +995,12 @@ def handle_incoming_command(
         tts.speak(response)
     except Exception as ex:
         logger.warning("TTS speaking failed for Groq: %s", str(ex))
+    if eye_display is not None and eye_display.is_alive():
+        try:
+            from src.display.eye_animator import EyeState as _ES
+            eye_display.set_state(_ES.LISTENING)
+        except Exception:
+            pass
 
 
 def process_todo_command(
@@ -665,6 +1014,7 @@ def process_todo_command(
     Executes the Todo operation, plays a bark sound, and speaks the confirmation via Edge TTS (Aarti).
     Returns True if processed successfully, False if intent was UNKNOWN.
     """
+    global eye_display
     intent = parsed_todo.get("intent", "UNKNOWN")
     if intent == "UNKNOWN":
         return False
@@ -720,10 +1070,22 @@ def process_todo_command(
 
     # 3. Speak via Edge TTS (Aarti)
     print(f"[Morphix] 🤖 Response: {response}")
+    if eye_display is not None and eye_display.is_alive():
+        try:
+            from src.display.eye_animator import EyeState as _ES
+            eye_display.set_state(_ES.SPEAKING)
+        except Exception:
+            pass
     try:
         tts.speak(response)
     except Exception as ex:
         logger.warning("TTS speaking failed for todo: %s", str(ex))
+    if eye_display is not None and eye_display.is_alive():
+        try:
+            from src.display.eye_animator import EyeState as _ES
+            eye_display.set_state(_ES.LISTENING)
+        except Exception:
+            pass
 
     return True
 
@@ -741,9 +1103,22 @@ def process_voice_command(
 
     :return: Spoken response string.
     """
+    global eye_display
     if not command_text:
         response = "I'm not sure how to do that yet."
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_state(_ES.SPEAKING)
+            except Exception:
+                pass
         tts.speak(response)
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_state(_ES.LISTENING)
+            except Exception:
+                pass
         return response
 
     result = intent_classifier.classify(command_text)
@@ -813,12 +1188,159 @@ def process_voice_command(
         else:
             response = "Reminder not found."
 
+    elif intent == IntentType.GET_WEATHER:
+        from src.intent.weather_plugin import WeatherService
+        ws = WeatherService.get_instance()
+        w_data = ws.get_weather()
+        is_hindi = params.get("is_hindi", False)
+        response = ws.format_speech_response(w_data, is_hindi=is_hindi)
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_weather_data(
+                    city=w_data['city'],
+                    temp=w_data['temperature'],
+                    condition=w_data['condition'],
+                    desc=w_data['description']
+                )
+                eye_display.set_state(_ES.WEATHER_HUD)
+            except Exception:
+                pass
+
+    elif intent == IntentType.PLAY_MUSIC:
+        from src.intent.music_plugin import MusicService
+        ms = MusicService.get_instance()
+        query = params.get("query", "popular trending music")
+        title = query.title()
+        response = ms.format_speech_response("play", title=title, is_hindi=params.get("is_hindi", False))
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_music_data(title, is_playing=True)
+                eye_display.set_state(_ES.MUSIC_MODE)
+            except Exception:
+                pass
+        ms.play(query)
+
+    elif intent == IntentType.NEXT_MUSIC:
+        from src.intent.music_plugin import MusicService
+        ms = MusicService.get_instance()
+        response = ms.format_speech_response("next", is_hindi=params.get("is_hindi", False))
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_music_data("Next Track", is_playing=True)
+                eye_display.set_state(_ES.MUSIC_MODE)
+            except Exception:
+                pass
+        ms.play("popular trending songs")
+
+    elif intent == IntentType.PAUSE_MUSIC:
+        from src.intent.music_plugin import MusicService
+        ms = MusicService.get_instance()
+        ms.pause()
+        response = ms.format_speech_response("pause", is_hindi=params.get("is_hindi", False))
+
+    elif intent == IntentType.RESUME_MUSIC:
+        from src.intent.music_plugin import MusicService
+        ms = MusicService.get_instance()
+        ms.resume()
+        response = ms.format_speech_response("resume", is_hindi=params.get("is_hindi", False))
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_state(_ES.MUSIC_MODE)
+            except Exception:
+                pass
+
+    elif intent == IntentType.STOP_MUSIC:
+        from src.intent.music_plugin import MusicService
+        ms = MusicService.get_instance()
+        ms.stop()
+        response = ms.format_speech_response("stop", is_hindi=params.get("is_hindi", False))
+
+    elif intent in (IntentType.SET_VOLUME, IntentType.INCREASE_VOLUME, IntentType.DECREASE_VOLUME, IntentType.MUTE_VOLUME, IntentType.UNMUTE_VOLUME):
+        from src.intent.volume_plugin import VolumeService
+        vs = VolumeService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+        if intent == IntentType.SET_VOLUME:
+            new_vol = vs.set_volume(params.get("level", 70))
+            response = vs.format_speech_response("set", level=new_vol, is_hindi=is_hindi)
+        elif intent == IntentType.INCREASE_VOLUME:
+            new_vol = vs.increase_volume(params.get("step", 15))
+            response = vs.format_speech_response("increase", level=new_vol, is_hindi=is_hindi)
+        elif intent == IntentType.DECREASE_VOLUME:
+            new_vol = vs.decrease_volume(params.get("step", 15))
+            response = vs.format_speech_response("decrease", level=new_vol, is_hindi=is_hindi)
+        elif intent == IntentType.MUTE_VOLUME:
+            vs.mute()
+            response = vs.format_speech_response("mute", is_hindi=is_hindi)
+        else:
+            new_vol = vs.get_volume()
+            vs.unmute()
+            response = vs.format_speech_response("unmute", level=new_vol, is_hindi=is_hindi)
+
+    elif intent == IntentType.GET_SYSTEM_HEALTH:
+        from src.intent.system_health_plugin import SystemHealthService
+        shs = SystemHealthService.get_instance()
+        t_data = shs.get_telemetry()
+        response = shs.format_speech_response(t_data, is_hindi=params.get("is_hindi", False))
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_telemetry_data(
+                    cpu=t_data["cpu"],
+                    ram=t_data["ram"],
+                    temp=t_data["temperature"],
+                    battery=t_data["battery"],
+                    is_charging=t_data["is_charging"],
+                    is_alert=t_data["is_thermal_alert"]
+                )
+                if t_data.get("is_thermal_alert", False):
+                    eye_display.set_state(_ES.SICK_COLD)
+                else:
+                    eye_display.set_state(_ES.TELEMETRY_HUD)
+            except Exception:
+                pass
+    elif intent == IntentType.GET_FESTIVAL:
+        from src.intent.festival_plugin import FestivalService
+        fest_svc = FestivalService.get_instance()
+        fest = fest_svc.get_todays_festival()
+        is_hindi = params.get("is_hindi", False)
+        if fest:
+            response = fest.greeting_hi if is_hindi else fest.greeting_en
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    eye_display.set_festival_theme(fest.theme, fest.badge_text)
+                except Exception:
+                    pass
+        else:
+            if is_hindi:
+                response = "Aaj koi vishesh tyohar nahi hai, lekin har din ek naya utsav hai!"
+            else:
+                response = "There are no major festivals today, but every day is a celebration!"
+
     else:
         response = "I'm not sure how to do that yet."
 
     logger.info("Speaking response: '%s'", response)
     print(f"[Morphix] 🤖 Response: {response}")
-    tts.speak(response)
+    if eye_display is not None and eye_display.is_alive():
+        try:
+            from src.display.eye_animator import EyeState as _ES
+            eye_display.set_state(_ES.SPEAKING)
+        except Exception:
+            pass
+    try:
+        tts.speak(response)
+    except Exception as ex:
+        logger.warning("TTS speaking failed: %s", str(ex))
+    if eye_display is not None and eye_display.is_alive():
+        try:
+            from src.display.eye_animator import EyeState as _ES
+            eye_display.set_state(_ES.LISTENING)
+        except Exception:
+            pass
     return response
 
 
@@ -844,7 +1366,7 @@ def main() -> None:
     # Declare globals and import modules so they receive loaded environment variables
     global Config, SoundPlayer, IntentClassifier, IntentType, ReminderChecker, ReminderManager
     global TodoManager, TranscriptCleaner, ReminderIntentParser, TodoParser, AIRegistry
-    global SpeechToText, TextToSpeech, VoiceAssistant, WakeWordDetector, OpenWakeWordEngine, WakeWordManager, groq_chat_mgr
+    global SpeechToText, TextToSpeech, VoiceAssistant, WakeWordDetector, OpenWakeWordEngine, WakeWordManager, groq_chat_mgr, eye_display
 
     from config import Config
     from src.audio.sound_player import SoundPlayer
@@ -902,6 +1424,34 @@ def main() -> None:
 
     transition_state(AssistantState.INITIALIZING)
     print("Initializing components...")
+
+    # -----------------------------------------------------------------------
+    # Start OLED Eye Display (daemon thread — starts immediately so the user
+    # sees the eyes as Morphix boots up).
+    # -----------------------------------------------------------------------
+    try:
+        from src.display.eye_animator import EyeAnimatorThread, EyeState
+        eye_display = EyeAnimatorThread(title="Morphix — OLED Eyes")
+        ok = eye_display.start(wait_ready=True, timeout=5.0)
+        if ok:
+            logger.info("Eye display started successfully.")
+            eye_display.set_state(EyeState.IDLE_NEUTRAL)
+
+            # Check active Indian Festival / seasonal celebration for today
+            try:
+                from src.intent.festival_plugin import FestivalService
+                fest = FestivalService.get_instance().get_todays_festival()
+                if fest:
+                    logger.info("🎉 Today is %s! Applying OLED theme: %s", fest.name, fest.theme)
+                    eye_display.set_festival_theme(fest.theme, fest.badge_text)
+            except Exception as _fest_exc:
+                logger.debug("Festival startup check exception: %s", _fest_exc)
+        else:
+            logger.warning("Eye display did not start cleanly — continuing without it.")
+            eye_display = None
+    except Exception as _eye_exc:
+        logger.warning("Could not start eye display: %s", str(_eye_exc))
+        eye_display = None
 
     dev_mode = getattr(Config, "DEVELOPMENT_MODE", False)
     debug_pipeline = getattr(Config, "DEBUG_AUDIO_PIPELINE", False)
@@ -978,6 +1528,13 @@ def main() -> None:
             transition_state(AssistantState.ACTIVE_MODE)
             logger.info("Active Mode Started")
 
+            # Show LISTENING eye immediately in dev mode
+            if eye_display:
+                try:
+                    eye_display.set_state(EyeState.LISTENING)
+                except Exception:
+                    pass
+
             try:
                 sound_player.play_sound(wake_sound, blocking=False)
             except Exception as ex:
@@ -986,11 +1543,11 @@ def main() -> None:
             print("Voice Assistant Ready (Development Mode).")
             print("Press Ctrl+C at any time to stop.\n")
 
-            active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 20.0)
+            active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 15.0)
             last_speech_time = time.time()
 
             # For dev mode, simulate bark play and listen status print
-            print("[Morphix] 🐶 Bark! Active listening (20s window)...")
+            print("[Morphix] 🐶 Bark! Active listening (15s window)...")
 
             while True:
                 if debug_pipeline:
@@ -1008,12 +1565,25 @@ def main() -> None:
                 if timeout_reached:
                     transition_state(AssistantState.WAIT_WAKE)
                     print("[Morphix] 😴 Waiting for wake word...")
+                    # Transition to DEEP_SLEEP with floating Zzz particles
+                    if eye_display:
+                        try:
+                            eye_display.set_state(EyeState.DEEP_SLEEP)
+                        except Exception:
+                            pass
                     break
 
                 cleaned_command = TranscriptCleaner.clean(recognized_command)
                 if is_meaningful_speech(cleaned_command):
                     transition_state(AssistantState.COMMAND_RECEIVED)
                     print(f"[Morphix] 👂 Heard: {cleaned_command}")
+
+                    # THINKING eye while processing command
+                    if eye_display:
+                        try:
+                            eye_display.set_state(EyeState.THINKING)
+                        except Exception:
+                            pass
 
                     handle_incoming_command(
                         cleaned_command=cleaned_command,
@@ -1030,7 +1600,19 @@ def main() -> None:
 
                     last_speech_time = time.time()
                     transition_state(AssistantState.ACTIVE_MODE)
-                    print("[Morphix] 🐶 Bark! Active listening (20s window)...")
+                    # Return to MUSIC_MODE if music is playing, otherwise LISTENING
+                    if eye_display:
+                        try:
+                            from src.intent.music_plugin import MusicService
+                            if MusicService.get_instance().is_playing():
+                                track = MusicService.get_instance().get_now_playing()
+                                title = track.title if track else "Music"
+                                eye_display.set_music_data(title, is_playing=True)
+                                eye_display.set_state(EyeState.MUSIC_MODE)
+                            else:
+                                eye_display.set_state(EyeState.LISTENING)
+                        except Exception:
+                            pass
                 else:
                     logger.info("No speech command detected.")
 
@@ -1039,6 +1621,11 @@ def main() -> None:
         except KeyboardInterrupt:
             reminder_checker.stop()
             mic_stream.stop()
+            if eye_display:
+                try:
+                    eye_display.stop()
+                except Exception:
+                    pass
             print("\n\nExiting Morphix Voice Assistant (Development Mode). Goodbye!")
             sys.exit(0)
 
@@ -1068,6 +1655,13 @@ def main() -> None:
         transition_state(AssistantState.WAIT_WAKE)
         print("[Morphix] 😴 Waiting for wake word...")
 
+        # Show IDLE_NEUTRAL while waiting for wake word
+        if eye_display:
+            try:
+                eye_display.set_state(EyeState.IDLE_NEUTRAL)
+            except Exception:
+                pass
+
         try:
             while True:
                 current_time = time.time()
@@ -1087,19 +1681,49 @@ def main() -> None:
                             # Flush the buffer to prevent immediate duplicate triggers
                             mic_stream.clear()
 
+                            # LISTENING eye on wake word
+                            if eye_display:
+                                try:
+                                    eye_display.set_state(EyeState.LISTENING)
+                                except Exception:
+                                    pass
+
                             # Play the dog bark sound (.wav) immediately via SoundPlayer asynchronously
                             try:
                                 sound_player.play_sound(wake_sound, blocking=False)
                             except Exception as ex:
                                 logger.warning("Sound playback skipped or unavailable: %s", str(ex))
 
-                            print("[Morphix] 🐶 Bark! Active listening (20s window)...")
+                            # Check if today is an Indian Festival and first wake interaction of the day
+                            try:
+                                from src.intent.festival_plugin import FestivalService
+                                fest_svc = FestivalService.get_instance()
+                                fest_today = fest_svc.get_todays_festival()
+                                if fest_today and fest_svc.should_play_first_wake_greeting(fest_today):
+                                    logger.info("First wake of festival day: '%s'! Speaking festive greeting.", fest_today.name)
+                                    if eye_display is not None and eye_display.is_alive():
+                                        try:
+                                            from src.display.eye_animator import EyeState as _ES
+                                            eye_display.set_state(_ES.SPEAKING)
+                                        except Exception:
+                                            pass
+                                    tts.speak(fest_today.greeting_hi, is_wake_response=True)
+                                    if eye_display is not None and eye_display.is_alive():
+                                        try:
+                                            from src.display.eye_animator import EyeState as _ES
+                                            eye_display.set_state(_ES.LISTENING)
+                                        except Exception:
+                                            pass
+                            except Exception as _fest_err:
+                                logger.debug("Festival first wake greeting exception: %s", _fest_err)
 
-                            # Standard Active mode (listens for 20 seconds for a command)
+                            print("[Morphix] 🐶 Bark! Active listening (15s window)...")
+
+                            # Standard Active mode (listens for 15 seconds for a command)
                             transition_state(AssistantState.ACTIVE_MODE)
                             logger.info("Active Mode Started")
 
-                            active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 20.0)
+                            active_timeout = getattr(Config, "ACTIVE_MODE_TIMEOUT", 15.0)
                             last_speech_time = time.time()
 
                             while True:
@@ -1117,12 +1741,25 @@ def main() -> None:
 
                                 if timeout_reached:
                                     logger.info("Active mode timeout reached. Transitioning to Sleep/Idle.")
+                                    # Transition to DEEP_SLEEP with floating Zzz particles
+                                    if eye_display:
+                                        try:
+                                            eye_display.set_state(EyeState.DEEP_SLEEP)
+                                        except Exception:
+                                            pass
                                     break
 
                                 cleaned_command = TranscriptCleaner.clean(recognized_command)
                                 if is_meaningful_speech(cleaned_command):
                                     transition_state(AssistantState.COMMAND_RECEIVED)
                                     print(f"[Morphix] 👂 Heard: {cleaned_command}")
+
+                                    # THINKING eye while processing
+                                    if eye_display:
+                                        try:
+                                            eye_display.set_state(EyeState.THINKING)
+                                        except Exception:
+                                            pass
 
                                     handle_incoming_command(
                                         cleaned_command=cleaned_command,
@@ -1139,7 +1776,19 @@ def main() -> None:
 
                                     last_speech_time = time.time()
                                     transition_state(AssistantState.ACTIVE_MODE)
-                                    print("[Morphix] 🐶 Bark! Active listening (20s window)...")
+                                    # Return to MUSIC_MODE if music is playing, otherwise LISTENING
+                                    if eye_display:
+                                        try:
+                                            from src.intent.music_plugin import MusicService
+                                            if MusicService.get_instance().is_playing():
+                                                track = MusicService.get_instance().get_now_playing()
+                                                title = track.title if track else "Music"
+                                                eye_display.set_music_data(title, is_playing=True)
+                                                eye_display.set_state(EyeState.MUSIC_MODE)
+                                            else:
+                                                eye_display.set_state(EyeState.LISTENING)
+                                        except Exception:
+                                            pass
                                 else:
                                     logger.info("No speech command detected.")
 
@@ -1150,10 +1799,21 @@ def main() -> None:
                             print("[Morphix] 😴 Waiting for wake word...")
                             mic_stream.clear()
                             last_check_time = time.time()
+                            # Keep DEEP_SLEEP with floating Zzz particles while waiting for next wake word
+                            if eye_display:
+                                try:
+                                    eye_display.set_state(EyeState.DEEP_SLEEP)
+                                except Exception:
+                                    pass
 
         except KeyboardInterrupt:
             reminder_checker.stop()
             mic_stream.stop()
+            if eye_display:
+                try:
+                    eye_display.stop()
+                except Exception:
+                    pass
             print("\n\nExiting Morphix Voice Assistant. Goodbye!")
             sys.exit(0)
 

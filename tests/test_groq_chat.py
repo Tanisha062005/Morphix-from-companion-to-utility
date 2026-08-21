@@ -83,6 +83,46 @@ class TestGroqChatManager(unittest.TestCase):
         self.assertEqual(reply, "Sorry, I had a glitch processing that!")
         self.assertEqual(len(mgr.history), 0)
 
+    def test_chat_with_emotion_happy(self) -> None:
+        mgr = GroqChatManager()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "[HAPPY] That sounds wonderful! I am so glad."
+        self.mock_groq_instance.chat.completions.create.return_value.choices = [mock_choice]
+
+        clean_text, emotion = mgr.chat_with_emotion("I got a new pet!")
+        self.assertEqual(emotion, "HAPPY")
+        self.assertEqual(clean_text, "That sounds wonderful! I am so glad.")
+
+    def test_chat_with_emotion_interactive(self) -> None:
+        mgr = GroqChatManager()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "[MEAL_BURGER] Yummy! Let's enjoy this delicious burger!"
+        self.mock_groq_instance.chat.completions.create.return_value.choices = [mock_choice]
+
+        clean_text, emotion = mgr.chat_with_emotion("Let's eat burgers!")
+        self.assertEqual(emotion, "MEAL_BURGER")
+        self.assertEqual(clean_text, "Yummy! Let's enjoy this delicious burger!")
+
+    def test_chat_with_emotion_fallback(self) -> None:
+        mgr = GroqChatManager()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "Just a regular untagged response."
+        self.mock_groq_instance.chat.completions.create.return_value.choices = [mock_choice]
+
+        clean_text, emotion = mgr.chat_with_emotion("How is the weather?")
+        self.assertEqual(emotion, "IDLE_NEUTRAL")
+        self.assertEqual(clean_text, "Just a regular untagged response.")
+
+    def test_chat_with_emotion_ignore(self) -> None:
+        mgr = GroqChatManager()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "[IGNORE]"
+        self.mock_groq_instance.chat.completions.create.return_value.choices = [mock_choice]
+
+        clean_text, emotion = mgr.chat_with_emotion("mummy khana de do")
+        self.assertEqual(emotion, "IGNORE")
+        self.assertEqual(clean_text, "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,7 +42,7 @@ class Config:
     STT_MODEL: str = os.getenv("MODEL", "base.en")
     WHISPER_MODELS_DIR: str = "models/whisper"
     WAKE_WORD_THRESHOLD: float = 82.0
-    ACTIVE_MODE_TIMEOUT: float = 20.0
+    ACTIVE_MODE_TIMEOUT: float = 15.0
 
     # Wake Word Pipeline Configuration
     WAKE_PHRASE: str = "hey morphix"

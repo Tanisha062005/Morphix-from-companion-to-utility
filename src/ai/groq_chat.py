@@ -52,13 +52,45 @@ class GroqChatManager:
             logger.error("Failed to initialize Groq client: %s", str(e))
             raise e
 
+        # Emotion tags that the LLM must choose from and prepend to every reply.
+        # The eye animator reads these to set the correct expression.
+        self._valid_emotion_tags = [
+            "IDLE_NEUTRAL", "LISTENING", "THINKING", "SPEAKING", "SLEEPY", "DEEP_SLEEP",
+            "HAPPY", "EXCITED", "WINKING", "HEART_EYES", "BLUSHING",
+            "SAD", "CRYING", "WORRIED", "SURPRISED", "CONFUSED", "POUTY", "ANGRY", "DIZZY", "SICK_COLD",
+            "BATTERY_FULL", "BATTERY_LOW", "GREET_HELLO", "WEATHER_HUD", "TELEMETRY_HUD", "MUSIC_MODE",
+            "MEAL_BURGER", "MEAL_NOODLES", "AFFECTION_PET", "INTERACTION_KISS_HUG",
+            "INTERACTION_BANG_SHOOT", "INTERACTION_RPS", "BIRTHDAY_PARTY", "IGNORE"
+        ]
+        emotion_list = ", ".join(f"[{t}]" for t in self._valid_emotion_tags if t != "IGNORE")
+
         self.system_prompt = (
             "You are Morphix, a witty, warm, and natural desktop companion robot.\n"
             "Reply in the SAME language and script as the user:\n"
             "- If user speaks English -> Reply in natural conversational English.\n"
             "- If user speaks Hindi/Hinglish -> Reply in natural Hindi/Hinglish.\n"
             "Keep replies short, expressive, and conversational (1 to 2 sentences max).\n"
-            "Speakable text only (no markdown symbols, bullets, or emojis)."
+            "Speakable text only (no markdown symbols, bullets, or emojis).\n\n"
+            "SMART INTENT REJECTION RULE:\n"
+            "If the transcribed user input is clearly ambient background chatter, side conversations, "
+            "someone talking or calling someone else in the room (not addressed to Morphix), "
+            "or random non-command speech fragments (e.g. talking to family, TV audio, background phone calls), "
+            "do NOT generate any conversational text. Reply ONLY with:\n"
+            "[IGNORE]\n\n"
+            "IMPORTANT — Emotion & Animation tag rule for valid commands:\n"
+            f"Always start valid replies with exactly ONE visual tag chosen from this palette:\n{emotion_list}\n"
+            "Place it at the very beginning of your response, followed by a single space, "
+            "then your actual reply.\n"
+            "Examples:\n"
+            "- [HAPPY] That sounds amazing! I am so glad to hear that.\n"
+            "- [EXCITED] Yay! Let's do it right away!\n"
+            "- [HEART_EYES] Aww, you are the sweetest friend ever!\n"
+            "- [BLUSHING] Aww, thank you, that means a lot to me!\n"
+            "- [MEAL_BURGER] Mmm, burger time! So tasty!\n"
+            "- [AFFECTION_PET] Hehe, I love head pats! You are the best.\n"
+            "- [BIRTHDAY_PARTY] Happy Birthday! Let's celebrate with lots of cake!\n"
+            "- [IGNORE]\n"
+            "Choose the tag that best matches the emotional tone and context of YOUR reply."
         )
 
         # Stores past turns as a list of dicts. We retain up to last 4 turns (8 messages).
@@ -142,3 +174,41 @@ class GroqChatManager:
                     return "Sorry, I had a glitch processing that!"
 
         return "Sorry, I had a glitch processing that!"
+
+    def chat_with_emotion(self, user_input: str) -> tuple:
+        """
+        Calls chat() and parses the leading [EMOTION_TAG] from the response.
+
+        Returns:
+            (clean_text: str, emotion_tag: str)
+
+        Where emotion_tag is one of the valid EyeState names (e.g. 'HAPPY'),
+        or 'IDLE_NEUTRAL' if no valid tag was found.
+        """
+        import re
+        raw = self.chat(user_input)
+        if not raw:
+            return raw, "IDLE_NEUTRAL"
+
+        # Match a leading [TAG] at the start of the response (e.g. [HAPPY] or [EXCITED]: )
+        match = re.match(r'^\[([A-Za-z0-9_]+)\][\s:]*', raw)
+        if match:
+            tag = match.group(1).upper()
+            clean_text = raw[match.end():].strip()
+            # Also clean any leftover leading tag artifacts
+            clean_text = re.sub(r'^\[.*?\][\s:]*', '', clean_text).strip()
+            if tag == "IGNORE":
+                logger.info("Smart Intent Rejector matched: IGNORE")
+                return "", "IGNORE"
+            elif tag in self._valid_emotion_tags:
+                logger.debug("Parsed emotion tag: %s", tag)
+                return clean_text, tag
+            else:
+                # Unknown tag — strip it anyway to keep TTS clean
+                logger.debug("Unknown emotion tag '%s' — defaulting to IDLE_NEUTRAL", tag)
+                return clean_text, "IDLE_NEUTRAL"
+
+        # Strip any bracketed prefix if present to keep TTS clean
+        clean_text = re.sub(r'^\[.*?\][\s:]*', '', raw).strip()
+        return clean_text, "IDLE_NEUTRAL"
+

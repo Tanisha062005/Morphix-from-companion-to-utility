@@ -36,6 +36,19 @@ class IntentType(str, Enum):
     ADD_REMINDER = "ADD_REMINDER"
     SHOW_REMINDERS = "SHOW_REMINDERS"
     DELETE_REMINDER = "DELETE_REMINDER"
+    GET_WEATHER = "GET_WEATHER"
+    PLAY_MUSIC = "PLAY_MUSIC"
+    PAUSE_MUSIC = "PAUSE_MUSIC"
+    RESUME_MUSIC = "RESUME_MUSIC"
+    STOP_MUSIC = "STOP_MUSIC"
+    NEXT_MUSIC = "NEXT_MUSIC"
+    SET_VOLUME = "SET_VOLUME"
+    INCREASE_VOLUME = "INCREASE_VOLUME"
+    DECREASE_VOLUME = "DECREASE_VOLUME"
+    MUTE_VOLUME = "MUTE_VOLUME"
+    UNMUTE_VOLUME = "UNMUTE_VOLUME"
+    GET_SYSTEM_HEALTH = "GET_SYSTEM_HEALTH"
+    GET_FESTIVAL = "GET_FESTIVAL"
     UNKNOWN = "UNKNOWN"
 
 
@@ -255,9 +268,38 @@ class IntentClassifier:
 
     def __init__(self) -> None:
         self._plugins: List[Any] = []
-        # Register default Morphix Phase 1 plugins
+        # Register default Morphix Phase 1 & 2 plugins
         self.register_plugin(TodoIntentPlugin())
         self.register_plugin(ReminderIntentPlugin())
+        try:
+            from src.intent.weather_plugin import WeatherIntentPlugin
+            self.register_plugin(WeatherIntentPlugin())
+        except Exception as e:
+            logger.warning("Could not load WeatherIntentPlugin: %s", str(e))
+
+        try:
+            from src.intent.music_plugin import MusicIntentPlugin
+            self.register_plugin(MusicIntentPlugin())
+        except Exception as e:
+            logger.warning("Could not load MusicIntentPlugin: %s", str(e))
+
+        try:
+            from src.intent.volume_plugin import VolumeIntentPlugin
+            self.register_plugin(VolumeIntentPlugin())
+        except Exception as e:
+            logger.warning("Could not load VolumeIntentPlugin: %s", str(e))
+
+        try:
+            from src.intent.system_health_plugin import SystemHealthIntentPlugin
+            self.register_plugin(SystemHealthIntentPlugin())
+        except Exception as e:
+            logger.warning("Could not load SystemHealthIntentPlugin: %s", str(e))
+
+        try:
+            from src.intent.festival_plugin import FestivalIntentPlugin
+            self.register_plugin(FestivalIntentPlugin())
+        except Exception as e:
+            logger.warning("Could not load FestivalIntentPlugin: %s", str(e))
 
     def register_plugin(self, plugin: Any) -> None:
         """
