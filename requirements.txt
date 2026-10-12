@@ -1,30 +1,36 @@
 # ==============================================================================
-# Morphix Desktop Companion Robot - Python Dependencies
+# Morphix Desktop Companion Robot - Production Python Dependencies
 # ==============================================================================
 
-# --- Audio Input & Continuous Recording ---
-sounddevice>=0.4.6        # Python interface for PortAudio (mic stream capture)
-numpy>=1.22.0             # Array operations (manipulating raw audio buffers)
+# --- Core System & Environment ---
+python-dotenv>=0.19.0     # Environment variable management (.env loading)
+psutil>=5.9.0             # System health & telemetry monitoring (CPU, RAM, temp)
 
-# --- Audio Playback & Sound Effects ---
-pygame>=2.1.0             # Playback of WAV audio assets (bark, wake sound)
+# --- Audio Input & Soundcard Hardware ---
+sounddevice>=0.4.6        # PortAudio mic stream capture & direct PCM output
+numpy>=1.22.0             # Fast array buffer manipulation
+pygame-ce>=2.3.0          # Hardware audio playback & OLED display rendering
 
-# --- Wake-Word Matching ---
-rapidfuzz>=3.0.0          # High-performance fuzzy string/token matching logic
-openwakeword>=0.5.1        # Modular offline wake-word detector
-
-# --- Wake-Word Runtime Inference Engines (For openWakeWord) ---
-# Install the runtime engine corresponding to your model format:
-tflite-runtime>=2.11.0    # Required for morphix.tflite model execution
-onnxruntime>=1.12.0       # Required for morphix.onnx model execution (optional fallback)
-
-# --- Speech-To-Text Transcription ---
-pywhispercpp>=0.1.0       # High-performance bindings for Whisper.cpp (tiny.en GGUF model)
+# --- Speech Recognition & Audio Streaming ---
+SpeechRecognition>=3.10.0  # STT transcription fallback via Web Speech API
+websockets>=13.0.0         # Async WebSocket server & client protocol
+miniaudio>=1.59            # Direct in-memory MP3 to 16kHz PCM audio decoder
+yt-dlp>=2024.0.0          # Free YouTube audio stream URL extractor
+imageio-ffmpeg>=0.4.8     # FFMPEG binary provider for PCM audio streaming
 
 # --- Text-To-Speech (Microsoft Edge TTS) ---
-edge-tts>=6.1.9           # Microsoft Edge TTS (Aarti Neural voice, en-IN & hi-IN)
+edge-tts>=6.1.9           # Edge TTS (Aarti Neural voice, en-IN & hi-IN)
 
-# --- Google Gemini AI Brain ---
-google-genai>=0.1.1       # Official modern Google Gen AI SDK
-python-dotenv>=0.19.0     # Environment variables loading
-groq>=1.6.0               # Groq Cloud API SDK for conversational brain
+# --- Wake-Word Detection & NLU ---
+rapidfuzz>=3.0.0          # High-performance fuzzy string/token matching
+openwakeword>=0.5.1       # Modular offline wake-word detector engine
+
+# --- Vision & Face Recognition ---
+opencv-contrib-python>=4.8.0 # OpenCV with LBPH face recognizer & Haar cascades
+
+# --- Regional Festivals & Holidays ---
+holidays>=0.30            # Dynamic Indian & Maharashtra festival calendar
+
+# --- Cloud AI LLM Providers ---
+groq>=1.6.0               # Groq Cloud API SDK (llama-3.3-70b-versatile)
+google-genai>=0.1.1       # Google Gen AI SDK for Gemini intelligence

@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 logger = logging.getLogger("Music")
@@ -60,15 +60,25 @@ class MusicService:
     _instance: Optional["MusicService"] = None
     _lock = threading.Lock()
 
+    # Volume level applied during TTS speech to prevent audio collision
+    DUCK_VOLUME: float = 0.18
+
     def __init__(self) -> None:
         self.current_track: Optional[TrackInfo] = None
         self._is_loading = False
-        self._volume = 0.7  # Default 70%
+        self._volume = 0.7           # Default 70%
+        self._pre_duck_volume = 0.7  # Saved volume before ducking
+        self._is_ducked = False
+        self._duck_lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._stream_thread: Optional[threading.Thread] = None
         self._playback_lock = threading.Lock()
+
+        # Session playlist history — stores (query, title) tuples in order played
+        self._play_history: List[Tuple[str, str]] = []
+        self._history_lock = threading.Lock()
 
     @classmethod
     def get_instance(cls) -> "MusicService":
@@ -77,9 +87,86 @@ class MusicService:
                 cls._instance = cls()
             return cls._instance
 
+    # ── Audio Ducking ──────────────────────────────────────────────────────────
+
+    def duck_for_tts(self) -> None:
+        """
+        Lowers music volume to DUCK_VOLUME (18%) when TTS is about to speak.
+        Safe to call even if no music is playing (no-op in that case).
+        """
+        with self._duck_lock:
+            if not self.is_playing() or self._is_ducked:
+                return
+            self._pre_duck_volume = self._volume
+            self._volume = self.DUCK_VOLUME
+            self._is_ducked = True
+            logger.debug("Audio duck applied: volume lowered to %.0f%% for TTS.", self.DUCK_VOLUME * 100)
+
+    def restore_after_tts(self) -> None:
+        """
+        Restores music to pre-duck volume after TTS playback finishes.
+        Safe to call when not ducked or when no music is playing.
+        """
+        with self._duck_lock:
+            if not self._is_ducked:
+                return
+            self._volume = self._pre_duck_volume
+            self._is_ducked = False
+            logger.debug("Audio duck restored: volume returned to %.0f%%.", self._volume * 100)
+
     def set_volume(self, volume: float) -> None:
         """Sets internal digital playback volume (0.0 to 1.0)."""
-        self._volume = max(0.0, min(1.0, float(volume)))
+        with self._duck_lock:
+            new_vol = max(0.0, min(1.0, float(volume)))
+            self._pre_duck_volume = new_vol   # Always update the undocked reference
+            if not self._is_ducked:
+                self._volume = new_vol
+
+    # ── Playlist History ───────────────────────────────────────────────────────
+
+    def _push_history(self, query: str, title: str) -> None:
+        """Pushes a played track into the session history buffer (max 20 entries)."""
+        with self._history_lock:
+            self._play_history.append((query, title))
+            if len(self._play_history) > 20:
+                self._play_history.pop(0)
+
+    def _build_next_query(self) -> str:
+        """
+        Returns a smart next-track search query.
+        Priority:
+        1. If current track has a known artist/title, search '{artist} more songs'.
+        2. If history has at least 1 entry, mix genre/context from last track.
+        3. Final fallback: genre-aware 'popular {genre} songs'.
+        """
+        with self._history_lock:
+            if self.current_track and self.current_track.title:
+                title = self.current_track.title
+                # Extract artist hint from 'Title - Artist' or 'Title by Artist' patterns
+                m = re.search(r'[-–]\s*(.+?)(?:\s*\||\s*$)', title)
+                if m:
+                    artist = m.group(1).strip()
+                    return f"{artist} popular songs"
+                return f"songs similar to {title}"
+
+            if self._play_history:
+                last_query, _ = self._play_history[-1]
+                # Strip common prefixes, keep the genre/artist core
+                cleaned = re.sub(r'^(?:play|songs similar to|similar to)\s+', '', last_query, flags=re.IGNORECASE).strip()
+                return f"more {cleaned}" if cleaned else "top trending songs today"
+
+        return "top trending songs today"
+
+    def next(self, on_started: Optional[Callable[[TrackInfo], None]] = None) -> Dict[str, Any]:
+        """
+        Skips to the next logical track using session history context.
+        Does NOT use the generic 'popular trending songs' hardcode.
+        """
+        next_query = self._build_next_query()
+        logger.info("Next track query: '%s'", next_query)
+        return self.play(next_query, on_started=on_started)
+
+    # ── Stream Resolution ──────────────────────────────────────────────────────
 
     def search_and_get_stream(self, query: str) -> Optional[Dict[str, Any]]:
         """
@@ -129,6 +216,7 @@ class MusicService:
     def play(self, query: str, on_started: Optional[Callable[[TrackInfo], None]] = None) -> Dict[str, Any]:
         """
         Asynchronously searches and starts direct hardware streaming for the requested song query.
+        Records the track in session history for smart next() navigation.
         """
         def _play_worker():
             self._is_loading = True
@@ -156,6 +244,9 @@ class MusicService:
                     self.current_track = track
                     self._stop_event.clear()
                     self._pause_event.clear()
+
+                # Push to session history
+                self._push_history(query, title)
 
                 if on_started:
                     on_started(track)
@@ -220,9 +311,10 @@ class MusicService:
                 if not chunk:
                     break
 
-                if self._volume != 1.0:
+                vol = self._volume  # Read once per chunk — thread-safe float read
+                if vol != 1.0:
                     arr = np.frombuffer(chunk, dtype=np.int16)
-                    arr = (arr * self._volume).astype(np.int16)
+                    arr = (arr * vol).astype(np.int16)
                     stream_out.write(arr.tobytes())
                 else:
                     stream_out.write(chunk)
@@ -242,15 +334,16 @@ class MusicService:
             logger.info("Direct soundcard audio stream finished.")
 
     def _kill_current_stream(self) -> None:
-        """Kills any active ffmpeg streaming subprocess."""
+        """Kills any active ffmpeg streaming subprocess, waiting for full termination."""
         self._stop_event.set()
         if self._proc is not None:
             try:
                 self._proc.terminate()
-                self._proc.wait(timeout=0.5)
+                self._proc.wait(timeout=1.0)   # Extended to 1s for reliable cleanup
             except Exception:
                 try:
                     self._proc.kill()
+                    self._proc.wait(timeout=0.5)
                 except Exception:
                     pass
             self._proc = None
@@ -280,9 +373,13 @@ class MusicService:
         return "Could not resume music."
 
     def stop(self) -> str:
-        """Stops music playback completely."""
+        """Stops music playback completely and ensures no orphaned subprocesses remain."""
         with self._playback_lock:
             self._kill_current_stream()
+            # Restore any active duck so audio state is clean for next session
+            with self._duck_lock:
+                self._is_ducked = False
+                self._volume = self._pre_duck_volume
             if self.current_track:
                 self.current_track.is_playing = False
                 self.current_track.is_paused = False
@@ -327,6 +424,7 @@ class MusicService:
                 return "Agla gaana chala rahi hoon."
             return "Playing the next track."
         return "Done."
+
 
 
 class MusicIntentPlugin:

@@ -89,14 +89,22 @@ def is_meaningful_speech(text: str) -> bool:
     return True
 
 
+_last_stt_offline_warning_time: float = 0.0
+
+
 def transcribe_with_google(wav_bytes: bytes) -> str:
     """
     Transcribes raw WAV bytes using Google Web Speech API (speech_recognition).
     Attempts primary en-IN transcription, falling back to hi-IN on low confidence.
+    Gracefully catches DNS/socket/network dropouts, throttles terminal error spam,
+    and transitions the Pygame display to the NO_INTERNET alert overlay.
     """
-    import speech_recognition as sr
+    global _last_stt_offline_warning_time
     import io
     import logging
+    import time
+    import speech_recognition as sr
+    from src.display.eye_animator import get_active_display
 
     logger = logging.getLogger("VoiceAssistantApp.GoogleSTT")
     recognizer = sr.Recognizer()
@@ -126,19 +134,42 @@ def transcribe_with_google(wav_bytes: bytes) -> str:
             else:
                 # If no alternatives returned, fallback directly
                 return recognizer.recognize_google(audio_data, language="hi-IN")
+        except sr.UnknownValueError:
+            # If primary recognition fails, attempt fallback to hi-IN
+            return recognizer.recognize_google(audio_data, language="hi-IN")
         except Exception as e:
-            # If primary recognition fails completely (e.g., non-English gibberish), try fallback to hi-IN
+            # Check if this is a network / DNS error
+            err_str = str(e).lower()
+            is_net_err = isinstance(e, (sr.RequestError, OSError, ConnectionError)) or any(
+                k in err_str for k in ["11001", "getaddrinfo", "nodename", "connection", "unreachable", "name or service not known", "timed out"]
+            )
+            if is_net_err:
+                raise e
             logger.warning("Google STT primary en-IN recognition failed, attempting fallback to hi-IN: %s", str(e))
             return recognizer.recognize_google(audio_data, language="hi-IN")
 
     except sr.UnknownValueError:
         # Graceful handling: return empty text, silence hallucinations
         return ""
-    except sr.RequestError as e:
-        logger.error("Google Speech Recognition RequestError: %s", e)
-        return ""
     except Exception as e:
-        logger.error("Error during Google Speech Recognition: %s", e)
+        err_str = str(e).lower()
+        is_net_err = isinstance(e, (sr.RequestError, OSError, ConnectionError)) or any(
+            k in err_str for k in ["11001", "getaddrinfo", "nodename", "connection", "unreachable", "name or service not known", "timed out", "request error"]
+        )
+        if is_net_err:
+            try:
+                disp = get_active_display()
+                if disp:
+                    disp.set_overlay("NO_INTERNET", timeout=5.0)
+            except Exception:
+                pass
+
+            now = time.time()
+            if now - _last_stt_offline_warning_time >= 5.0:
+                _last_stt_offline_warning_time = now
+                logger.warning("[Morphix] Network offline / DNS error during STT: %s", str(e))
+        else:
+            logger.error("Error during Google Speech Recognition: %s", e)
         return ""
 
 
@@ -149,12 +180,12 @@ class ContinuousMicrophoneStream:
     pre-speech audio frames to live speech recordings.
     """
 
-    def __init__(self, sample_rate: int = 16000, blocksize: int = 1600, preroll_ms: int = 500, sound_player: Optional[Any] = None) -> None:
+    def __init__(self, sample_rate: int = 16000, blocksize: int = 800, preroll_ms: int = 500, sound_player: Optional[Any] = None) -> None:
         """
         Initializes continuous microphone stream and ring buffer.
 
         :param sample_rate: Audio sampling rate in Hz (default: 16000 Hz).
-        :param blocksize: Audio buffer block size in samples (default: 1600).
+        :param blocksize: Audio buffer block size in samples (default: 800 = 50ms chunk).
         :param preroll_ms: Duration of pre-speech audio ring buffer in milliseconds (default: 500 ms).
         :param sound_player: Optional SoundPlayer instance to check if bark is playing.
         """
@@ -349,19 +380,15 @@ def record_command_with_vad(
     stt: SpeechToText,
     max_duration: float = 10.0,
     silence_timeout: float = 1.5,
-    post_tts_pause_ms: int = 200,
+    post_tts_pause_ms: int = 50,
     active_timeout: float = 300.0,
     last_speech_time_ref: float = 0.0
-) -> Tuple[Optional[bytes], str, bool]:
+) -> Tuple[Optional[bytes], str, bool, float]:
     """
-    Captures complete streaming command audio from ContinuousMicrophoneStream queue:
-        1. Initializes recording queue before post-TTS pause to preserve audio.
-        2. Waits post-TTS pause (200ms default) to flush audio playback echo.
-        3. Waits for speech activity (RMS >= 100.0). Periodically logs the active mode countdown.
-        4. If inactivity timeout is reached before speech, returns (None, "", True).
-        5. Once speech starts, records until 1.5 seconds of silence or max_duration (10s) reached.
-        6. Returns the complete transcribed string and timeout_reached flag.
+    Returns a 4-tuple: (wav_bytes, transcript, timeout_reached, updated_last_speech_time).
+    The 4th element lets callers update their inactivity reference without mutation bugs.
     """
+    # (docstring moved above signature — see 4-tuple comment above)
     global eye_display
     import numpy as np
 
@@ -398,6 +425,9 @@ def record_command_with_vad(
     vad_trigger_time = 0.0
 
     accumulated_blocks = []
+    # 500ms rolling pre-speech buffer so initial syllables ("Yes", "Hey") are never clipped before VAD trigger
+    max_pre_blocks = max(1, int((500 / 1000.0) * (mic_stream.sample_rate / mic_stream.blocksize)))
+    pre_speech_blocks = collections.deque(maxlen=max_pre_blocks)
     silence_duration = 0.0
     rms_list = []
 
@@ -408,23 +438,40 @@ def record_command_with_vad(
                 from src.intent.music_plugin import MusicService
                 is_music_active = False
                 try:
+                    from src.intent.music_plugin import MusicService
                     is_music_active = MusicService.get_instance().is_playing()
                 except Exception:
                     pass
 
-                if is_music_active:
-                    # While music is streaming, freeze the 15-second sleep timer completely
+                is_surveillance_active = False
+                try:
+                    from src.vision.camera_manager import CameraManager
+                    is_surveillance_active = CameraManager.get_instance().is_surveillance_active()
+                except Exception:
+                    pass
+
+                if is_surveillance_active or is_music_active:
+                    # While surveillance guard mode is active or music is streaming, freeze the 15-second sleep timer completely
                     last_speech_time_ref = time.time()
-                    if eye_display is not None and eye_display.is_alive():
-                        try:
-                            from src.display.eye_animator import EyeState as _ES
-                            if eye_display.get_state() != _ES.MUSIC_MODE:
-                                track = MusicService.get_instance().get_now_playing()
-                                title = track.title if track else "Music"
-                                eye_display.set_music_data(title, is_playing=True)
-                                eye_display.set_state(_ES.MUSIC_MODE)
-                        except Exception:
-                            pass
+                    if is_surveillance_active:
+                        if eye_display is not None and eye_display.is_alive():
+                            try:
+                                from src.display.eye_animator import EyeState as _ES
+                                if eye_display.get_state() != _ES.SENTRY_SCAN:
+                                    eye_display.set_state(_ES.SENTRY_SCAN)
+                            except Exception:
+                                pass
+                    elif is_music_active:
+                        if eye_display is not None and eye_display.is_alive():
+                            try:
+                                from src.display.eye_animator import EyeState as _ES
+                                if eye_display.get_state() != _ES.MUSIC_MODE:
+                                    track = MusicService.get_instance().get_now_playing()
+                                    title = track.title if track else "Music"
+                                    eye_display.set_music_data(title, is_playing=True)
+                                    eye_display.set_state(_ES.MUSIC_MODE)
+                            except Exception:
+                                pass
                 else:
                     current_time = time.time()
                     elapsed_since_speech = current_time - last_speech_time_ref
@@ -449,7 +496,7 @@ def record_command_with_vad(
 
                     if elapsed_since_speech >= active_timeout:
                         logger.info("Inactivity timeout (%.1fs) reached. Returning to Deep Sleep.", active_timeout)
-                        return None, "", True
+                        return None, "", True, last_speech_time_ref
 
             try:
                 block = mic_stream.recording_queue.get(timeout=0.5)
@@ -478,6 +525,8 @@ def record_command_with_vad(
                     if debug_pipeline:
                         print("Recording...")
                     start_time = time.time()
+                    # Prepend captured pre-speech blocks to eliminate start-of-speech clipping
+                    accumulated_blocks.extend(pre_speech_blocks)
                     if eye_display is not None and eye_display.is_alive():
                         try:
                             from src.display.eye_animator import EyeState as _ES
@@ -488,7 +537,9 @@ def record_command_with_vad(
                 last_speech_time = time.time()
                 silence_duration = 0.0
             else:
-                if speech_started:
+                if not speech_started:
+                    pre_speech_blocks.append(block)
+                else:
                     silence_duration = time.time() - last_speech_time
                     if silence_duration >= silence_timeout:
                         logger.info("Silence detected (%.1fs >= %.1fs). Ending command capture.", silence_duration, silence_timeout)
@@ -515,7 +566,7 @@ def record_command_with_vad(
             print("Recording stopped")
 
     if not speech_started:
-        return None, "", False
+        return None, "", False, last_speech_time_ref
 
     logger.info("Transcribing recording...")
 
@@ -545,7 +596,8 @@ def record_command_with_vad(
     logger.info("Recording Duration: %.2f seconds", recording_duration)
     logger.info("Silence Duration: %.2f seconds", silence_duration)
 
-    return final_wav_bytes, final_sentence, False
+    # Return updated last_speech_time so callers can advance their inactivity reference
+    return final_wav_bytes, final_sentence, False, time.time()
 
 
 def handle_incoming_command(
@@ -809,7 +861,7 @@ def handle_incoming_command(
                     except Exception:
                         pass
 
-            ms.play("popular trending songs", on_started=_on_next_started)
+            ms.next(on_started=_on_next_started)
             if eye_display is not None and eye_display.is_alive():
                 try:
                     from src.display.eye_animator import EyeState as _ES
@@ -894,7 +946,8 @@ def handle_incoming_command(
         elif result.intent == IntentType.GET_WEATHER:
             from src.intent.weather_plugin import WeatherService
             ws = WeatherService.get_instance()
-            w_data = ws.get_weather()
+            target_city = result.parameters.get("city") if result.parameters else None
+            w_data = ws.get_weather(target_city=target_city)
             response = ws.format_speech_response(w_data, is_hindi=is_hindi)
             print(f"[Morphix] 🌦️ Weather Info: {w_data['city']} | {w_data['temperature']}°C | {w_data['description']}")
             print(f"[Morphix] 🤖 Response: {response}")
@@ -935,15 +988,156 @@ def handle_incoming_command(
                 "new_item": result.parameters.get("new_item", "")
             }
             process_todo_command(parsed_todo, todo_mgr, sound_player, wake_sound, tts)
-        else:
-            response = process_voice_command(
-                command_text=cleaned_command,
-                intent_classifier=intent_classifier,
-                todo_mgr=todo_mgr,
-                reminder_mgr=reminder_mgr,
-                tts=tts
+            return
+
+        # ── Single-pass inline handler for remaining intents ──────────────────
+        # IMPORTANT: Uses already-classified `result` — NO second classify() call.
+        # This is the authoritative handler for Reminder, Festival, Profile,
+        # Surveillance intents. `process_voice_command()` is no longer called
+        # from here to prevent double-TTS and double-classification.
+        response = ""
+        _is_hindi = is_hindi
+
+        if result.intent == IntentType.ADD_REMINDER:
+            rem_text = result.parameters.get("text", "")
+            time_expr = result.parameters.get("time_expr", "")
+            if rem_text:
+                reminder_mgr.add_reminder(rem_text, time_expr)
+                response = "Reminder saved." if not _is_hindi else "Yaad dilana save ho gaya."
+            else:
+                response = "I couldn't catch the reminder details." if not _is_hindi else "Reminder ki details samajh nahi aayi."
+
+        elif result.intent == IntentType.SHOW_REMINDERS:
+            pending_rems = reminder_mgr.get_pending_reminders()
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    rem_dicts = [{"text": r.get("message") or r.get("text", "Reminder"), "due": r.get("trigger_time", "")} for r in pending_rems]
+                    if hasattr(eye_display, "set_overlay"):
+                        eye_display.set_overlay("REMINDER_VIEW", data=rem_dicts, timeout=10.0)
+                    elif hasattr(eye_display, "show_reminders_overlay"):
+                        eye_display.show_reminders_overlay(rem_dicts, timeout=10.0)
+                except Exception as ex:
+                    logger.warning("Failed to render reminders overlay: %s", ex)
+            if not pending_rems:
+                response = "Reminder list is empty." if not _is_hindi else "Koi reminder nahi hai."
+            else:
+                rem_list_str = ", ".join(f"{r.get('text', '')}" for r in pending_rems)
+                count = len(pending_rems)
+                response = f"You have {count} pending reminder{'s' if count != 1 else ''}: {rem_list_str}."
+
+        elif result.intent == IntentType.DELETE_REMINDER:
+            target_str = result.parameters.get("target", "")
+            deleted_rem = reminder_mgr.delete_reminder(target_str)
+            if deleted_rem:
+                response = "Reminder deleted." if not _is_hindi else "Reminder delete ho gaya."
+            else:
+                response = "Reminder not found." if not _is_hindi else "Reminder nahi mila."
+
+        elif result.intent == IntentType.GET_FESTIVAL:
+            from src.intent.festival_plugin import FestivalIntentPlugin
+            plugin = FestivalIntentPlugin()
+            response = plugin.handle(result, display=eye_display)
+
+        elif result.intent == IntentType.SET_USER_NAME:
+            from src.intent.profile_plugin import ProfileService
+            ps = ProfileService.get_instance()
+            target_name = result.parameters.get("name", "User")
+            response = ps.set_user_name(target_name, is_hindi=_is_hindi)
+
+        elif result.intent == IntentType.GET_USER_NAME:
+            from src.intent.profile_plugin import ProfileService
+            ps = ProfileService.get_instance()
+            response = ps.get_user_name(is_hindi=_is_hindi)
+
+        elif result.intent == IntentType.ENROLL_FACE:
+            from src.intent.profile_plugin import ProfileService
+            ps = ProfileService.get_instance()
+            prompt_msg = (
+                "Kripya camera ki taraf dekhein. Aapka face capture kiya jaa raha hai."
+                if _is_hindi
+                else "Please look directly into the camera. Capturing your face now."
             )
+            print(f"[Morphix] 🤖 Response: {prompt_msg}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.THINKING)
+                except Exception:
+                    pass
+            try:
+                tts.speak(prompt_msg)
+            except Exception:
+                pass
+            response = ps.enroll_user_face(is_hindi=_is_hindi)
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.HAPPY)
+                except Exception:
+                    pass
+
+        elif result.intent == IntentType.START_SURVEILLANCE:
+            from src.intent.surveillance_plugin import SurveillanceService
+            ss = SurveillanceService.get_instance()
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.SENTRY_SCAN)
+                except Exception:
+                    pass
+            response = ss.start_surveillance(is_hindi=_is_hindi)
+
+        elif result.intent == IntentType.STOP_SURVEILLANCE:
+            from src.intent.surveillance_plugin import SurveillanceService
+            ss = SurveillanceService.get_instance()
+            response = ss.stop_surveillance(is_hindi=_is_hindi)
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.IDLE_NEUTRAL)
+                except Exception:
+                    pass
+
+        elif result.intent == IntentType.GET_SURVEILLANCE_STATUS:
+            from src.intent.surveillance_plugin import SurveillanceService
+            ss = SurveillanceService.get_instance()
+            response = ss.get_status(is_hindi=_is_hindi)
+
+        elif result.intent == IntentType.DELETE_SURVEILLANCE_CAPTURES:
+            from src.intent.surveillance_plugin import SurveillanceService
+            ss = SurveillanceService.get_instance()
+            response = ss.delete_surveillance_captures(is_hindi=_is_hindi)
+
+        elif result.intent == IntentType.PLAY_RPS:
+            from src.intent.rps_game_plugin import RPSGamePlugin
+            plugin = RPSGamePlugin()
+            response = plugin.handle(result, display=eye_display, tts=tts)
+
+        else:
+            response = "I'm not sure how to do that yet." if not _is_hindi else "Mujhe abhi yeh nahi pata."
+
+        # Single TTS call for all inline-handled intents
+        if response:
+            logger.info("Speaking response: '%s'", response)
+            print(f"[Morphix] 🤖 Response: {response}")
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.SPEAKING)
+                except Exception:
+                    pass
+            try:
+                tts.speak(response)
+            except Exception as ex:
+                logger.warning("TTS speaking failed: %s", str(ex))
+            if eye_display is not None and eye_display.is_alive():
+                try:
+                    from src.display.eye_animator import EyeState as _ES
+                    eye_display.set_state(_ES.LISTENING)
+                except Exception:
+                    pass
         return
+
 
     # 3. Step 2: If NO local plugin matches (Unclassified / General Chat) -> Send to Groq Chat
     print("[Morphix] 🌐 Mode: GROQ AI")
@@ -1056,6 +1250,14 @@ def process_todo_command(
             response = "Todo not found."
     elif intent == "SHOW_TODO":
         pending = todo_mgr.get_pending_todos()
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                if hasattr(eye_display, "set_overlay"):
+                    eye_display.set_overlay("TODO_VIEW", tasks=pending, timeout=10.0)
+                elif hasattr(eye_display, "show_todo_overlay"):
+                    eye_display.show_todo_overlay(pending, timeout=10.0)
+            except Exception as ex:
+                logger.warning("Failed to render todo overlay: %s", ex)
         if not pending:
             response = "Your todo list is empty!"
         else:
@@ -1066,6 +1268,14 @@ def process_todo_command(
                 response = f"You have {len(pending)} pending tasks: {task_list_str}."
     elif intent == "CLEAR_TODO":
         todo_mgr.clear_all_todos()
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                if hasattr(eye_display, "set_overlay"):
+                    eye_display.set_overlay("TODO_VIEW", tasks=[], timeout=4.0)
+                elif hasattr(eye_display, "show_todo_overlay"):
+                    eye_display.show_todo_overlay([], timeout=4.0)
+            except Exception as ex:
+                logger.warning("Failed to render clear-todo overlay: %s", ex)
         response = "All tasks have been cleared from your todo list."
 
     # 3. Speak via Edge TTS (Aarti)
@@ -1098,12 +1308,19 @@ def process_voice_command(
     tts: TextToSpeech
 ) -> str:
     """
-    Processes recognized voice command text through IntentClassifier,
-    executes matching Todo/Reminder manager operation, and speaks Edge TTS (Aarti) response.
+    Auxiliary utility that classifies and executes a voice command.
 
-    :return: Spoken response string.
+    NOTE: This function is retained for standalone utility use (e.g., tests, direct calls).
+    It is NO LONGER called from the main handle_incoming_command() routing path to
+    prevent double-classification and double-TTS (see inline handler block in that function).
+
+    TodoManager API: Exclusively uses add_task/get_pending_tasks/complete_task/
+    delete_task/clear_all_tasks throughout to prevent dual-API divergence (#3).
     """
-    global eye_display
+    global eye_display, IntentType
+    if IntentType is None:
+        from src.intent.intent_classifier import IntentType
+
     if not command_text:
         response = "I'm not sure how to do that yet."
         if eye_display is not None and eye_display.is_alive():
@@ -1128,70 +1345,58 @@ def process_voice_command(
     logger.info("Executing action for intent: %s (Params: %s)", intent.value, params)
 
     if intent == IntentType.ADD_TODO:
-        task_str = params.get("task", "")
-        if task_str:
-            todo_mgr.add_task(task_str)
-            response = "Task added."
+        task = params.get("task", "")
+        is_hindi = params.get("is_hindi", False)
+        if task:
+            from src.intent.todo_plugin import TodoService
+            response = TodoService.get_instance().add_task(task, is_hindi=is_hindi, display=eye_display)
         else:
             response = "I couldn't catch the task details."
 
     elif intent == IntentType.SHOW_TODO:
-        pending = todo_mgr.get_pending_tasks()
-        if not pending:
-            response = "Todo list is empty."
-        else:
-            task_list_str = ", ".join(f"{i+1}. {t.get('task')}" for i, t in enumerate(pending))
-            response = f"You have {len(pending)} pending tasks: {task_list_str}."
+        from src.intent.todo_plugin import TodoService
+        is_hindi = params.get("is_hindi", False)
+        response = TodoService.get_instance().show_todo_list(is_hindi=is_hindi, display=eye_display)
 
     elif intent == IntentType.COMPLETE_TODO:
         task_query = params.get("task", "")
-        completed_item = todo_mgr.complete_task(task_query)
-        if completed_item:
-            response = "Task completed."
-        else:
-            response = "Task not found."
+        from src.intent.todo_plugin import TodoService
+        response = TodoService.get_instance().complete_task(task_query, is_hindi=params.get("is_hindi", False))
 
     elif intent == IntentType.DELETE_TODO:
         task_query = params.get("task", "")
-        deleted_item = todo_mgr.delete_task(task_query)
-        if deleted_item:
-            response = "Task deleted."
-        else:
-            response = "Task not found."
+        from src.intent.todo_plugin import TodoService
+        response = TodoService.get_instance().delete_task(task_query, is_hindi=params.get("is_hindi", False))
 
     elif intent == IntentType.CLEAR_TODO:
-        todo_mgr.clear_all_tasks()
-        response = "Todo list is empty."
+        from src.intent.todo_plugin import TodoService
+        response = TodoService.get_instance().clear_all(is_hindi=params.get("is_hindi", False), display=eye_display)
 
     elif intent == IntentType.ADD_REMINDER:
         rem_text = params.get("text", "")
         time_expr = params.get("time_expr", "")
+        is_hindi = params.get("is_hindi", False)
         if rem_text:
-            reminder_mgr.add_reminder(rem_text, time_expr)
-            response = "Reminder saved."
+            from src.intent.reminder_plugin import ReminderService
+            response = ReminderService.get_instance().add_reminder(rem_text, time_expr, is_hindi=is_hindi, display=eye_display)
         else:
             response = "I couldn't catch the reminder details."
 
     elif intent == IntentType.SHOW_REMINDERS:
-        pending_rems = reminder_mgr.get_pending_reminders()
-        if not pending_rems:
-            response = "Reminder list is empty."
-        else:
-            rem_list_str = ", ".join(f"{r.get('text')}" for r in pending_rems)
-            response = f"You have {len(pending_rems)} pending reminders: {rem_list_str}."
+        from src.intent.reminder_plugin import ReminderService
+        is_hindi = params.get("is_hindi", False)
+        response = ReminderService.get_instance().show_reminders(is_hindi=is_hindi, display=eye_display)
 
     elif intent == IntentType.DELETE_REMINDER:
         target_str = params.get("target", "")
-        deleted_rem = reminder_mgr.delete_reminder(target_str)
-        if deleted_rem:
-            response = "Reminder deleted."
-        else:
-            response = "Reminder not found."
+        from src.intent.reminder_plugin import ReminderService
+        response = ReminderService.get_instance().delete_reminder(target_str, is_hindi=params.get("is_hindi", False))
 
     elif intent == IntentType.GET_WEATHER:
         from src.intent.weather_plugin import WeatherService
         ws = WeatherService.get_instance()
-        w_data = ws.get_weather()
+        target_city = params.get("city") if params else None
+        w_data = ws.get_weather(target_city=target_city)
         is_hindi = params.get("is_hindi", False)
         response = ws.format_speech_response(w_data, is_hindi=is_hindi)
         if eye_display is not None and eye_display.is_alive():
@@ -1233,7 +1438,7 @@ def process_voice_command(
                 eye_display.set_state(_ES.MUSIC_MODE)
             except Exception:
                 pass
-        ms.play("popular trending songs")
+        ms.next()
 
     elif intent == IntentType.PAUSE_MUSIC:
         from src.intent.music_plugin import MusicService
@@ -1319,6 +1524,89 @@ def process_voice_command(
                 response = "Aaj koi vishesh tyohar nahi hai, lekin har din ek naya utsav hai!"
             else:
                 response = "There are no major festivals today, but every day is a celebration!"
+
+    elif intent == IntentType.SET_USER_NAME:
+        from src.intent.profile_plugin import ProfileService
+        ps = ProfileService.get_instance()
+        target_name = params.get("name", "User")
+        is_hindi = params.get("is_hindi", False)
+        response = ps.set_user_name(target_name, is_hindi=is_hindi)
+
+    elif intent == IntentType.GET_USER_NAME:
+        from src.intent.profile_plugin import ProfileService
+        ps = ProfileService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+        response = ps.get_user_name(is_hindi=is_hindi)
+
+    elif intent == IntentType.ENROLL_FACE:
+        from src.intent.profile_plugin import ProfileService
+        ps = ProfileService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+
+        # 1. Prompt user to look at camera
+        prompt_msg = "Kripya camera ki taraf dekhein. Aapka face capture kiya jaa raha hai." if is_hindi else "Please look directly into the camera. Capturing your face now."
+        print(f"[Morphix] 🤖 Response: {prompt_msg}")
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_state(_ES.THINKING)
+            except Exception:
+                pass
+        try:
+            tts.speak(prompt_msg)
+        except Exception:
+            pass
+
+        # 2. Capture face frames and retrain
+        response = ps.enroll_user_face(is_hindi=is_hindi)
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_state(_ES.HAPPY)
+            except Exception:
+                pass
+
+    elif intent == IntentType.START_SURVEILLANCE:
+        from src.intent.surveillance_plugin import SurveillanceService
+        ss = SurveillanceService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_state(_ES.SENTRY_SCAN)
+            except Exception:
+                pass
+        response = ss.start_surveillance(is_hindi=is_hindi)
+
+    elif intent == IntentType.STOP_SURVEILLANCE:
+        from src.intent.surveillance_plugin import SurveillanceService
+        ss = SurveillanceService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+        response = ss.stop_surveillance(is_hindi=is_hindi)
+        if eye_display is not None and eye_display.is_alive():
+            try:
+                from src.display.eye_animator import EyeState as _ES
+                eye_display.set_state(_ES.IDLE_NEUTRAL)
+            except Exception:
+                pass
+
+    elif intent == IntentType.GET_SURVEILLANCE_STATUS:
+        from src.intent.surveillance_plugin import SurveillanceService
+        ss = SurveillanceService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+        response = ss.get_status(is_hindi=is_hindi)
+
+    elif intent == IntentType.DELETE_SURVEILLANCE_CAPTURES:
+        from src.intent.surveillance_plugin import SurveillanceService
+        ss = SurveillanceService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+        response = ss.delete_surveillance_captures(is_hindi=is_hindi)
+
+    elif intent == IntentType.PLAY_RPS:
+        from src.intent.rps_game_plugin import RPSService
+        rps_svc = RPSService.get_instance()
+        is_hindi = params.get("is_hindi", False)
+        response = rps_svc.play_round(is_hindi=is_hindi, display=eye_display, tts=tts)
 
     else:
         response = "I'm not sure how to do that yet."
@@ -1446,6 +1734,22 @@ def main() -> None:
                     eye_display.set_festival_theme(fest.theme, fest.badge_text)
             except Exception as _fest_exc:
                 logger.debug("Festival startup check exception: %s", _fest_exc)
+
+            # Register CameraManager display state callback for SENTRY_SCAN
+            try:
+                from src.vision.camera_manager import CameraManager
+                from src.display.eye_animator import EyeState as _ES
+
+                def _on_camera_eye_state(state_name: str):
+                    if eye_display and eye_display.is_alive():
+                        if state_name == "SENTRY_SCAN":
+                            eye_display.set_state(_ES.SENTRY_SCAN)
+                        elif state_name == "IDLE_NEUTRAL":
+                            eye_display.set_state(_ES.IDLE_NEUTRAL)
+
+                CameraManager.get_instance().set_display_callback(_on_camera_eye_state)
+            except Exception as _cam_exc:
+                logger.debug("Camera callback registration exception: %s", _cam_exc)
         else:
             logger.warning("Eye display did not start cleanly — continuing without it.")
             eye_display = None
@@ -1501,14 +1805,20 @@ def main() -> None:
     )
     reminder_checker.start()
 
-    # Initialize continuous microphone stream with 500ms pre-roll
-    mic_stream = ContinuousMicrophoneStream(sample_rate=16000, blocksize=1600, preroll_ms=500, sound_player=sound_player)
+    # Initialize continuous microphone stream with 500ms pre-roll (800 samples = 50ms chunk for instant responsiveness)
+    mic_stream = ContinuousMicrophoneStream(sample_rate=16000, blocksize=800, preroll_ms=500, sound_player=sound_player)
     if not mic_stream.start():
         logger.error("Unable to initialize continuous microphone stream. Exiting.")
         sys.exit(1)
 
     wake_sound = getattr(Config, "WAKE_SOUND", "assets/sounds/morphix_voice.wav")
-    greeting_msg = getattr(Config, "WAKE_RESPONSE", "Hello Tanisha! I'm listening.")
+    # Dynamic greeting — reads current primary user name from profile config
+    try:
+        from src.config.profile_manager import get_primary_user as _get_user
+        _user_name = _get_user()
+    except Exception:
+        _user_name = "there"
+    greeting_msg = getattr(Config, "WAKE_RESPONSE", f"Hello {_user_name}! I'm listening.")
 
     # WakeWordDetector using WAKE_PHRASES configuration
     wake_phrases = getattr(Config, "WAKE_PHRASES", ["hey morphix"])
@@ -1552,15 +1862,17 @@ def main() -> None:
             while True:
                 if debug_pipeline:
                     print("\nNow listening for command...")
-                command_wav, recognized_command, timeout_reached = record_command_with_vad(
+                command_wav, recognized_command, timeout_reached, updated_last_speech_time = record_command_with_vad(
                     mic_stream=mic_stream,
                     stt=stt,
                     max_duration=10.0,
                     silence_timeout=1.5,
-                    post_tts_pause_ms=200,
+                    post_tts_pause_ms=50,
                     active_timeout=active_timeout,
                     last_speech_time_ref=last_speech_time
                 )
+                # Advance inactivity reference: fixes pass-by-value timer bug
+                last_speech_time = updated_last_speech_time
 
                 if timeout_reached:
                     transition_state(AssistantState.WAIT_WAKE)
@@ -1598,7 +1910,7 @@ def main() -> None:
                         intent_classifier=intent_classifier
                     )
 
-                    last_speech_time = time.time()
+                    last_speech_time = time.time()  # Reset after command processed
                     transition_state(AssistantState.ACTIVE_MODE)
                     # Return to MUSIC_MODE if music is playing, otherwise LISTENING
                     if eye_display:
@@ -1707,7 +2019,7 @@ def main() -> None:
                                             eye_display.set_state(_ES.SPEAKING)
                                         except Exception:
                                             pass
-                                    tts.speak(fest_today.greeting_hi, is_wake_response=True)
+                                    tts.speak(fest_today.greeting_hi)
                                     if eye_display is not None and eye_display.is_alive():
                                         try:
                                             from src.display.eye_animator import EyeState as _ES
@@ -1729,15 +2041,17 @@ def main() -> None:
                             while True:
                                 if debug_pipeline:
                                     print("\nNow listening for command...")
-                                command_wav, recognized_command, timeout_reached = record_command_with_vad(
+                                command_wav, recognized_command, timeout_reached, updated_last_speech_time = record_command_with_vad(
                                     mic_stream=mic_stream,
                                     stt=stt,
                                     max_duration=10.0,
                                     silence_timeout=1.5,
-                                    post_tts_pause_ms=200,
+                                    post_tts_pause_ms=50,
                                     active_timeout=active_timeout,
                                     last_speech_time_ref=last_speech_time
                                 )
+                                # Advance inactivity reference: fixes pass-by-value timer bug
+                                last_speech_time = updated_last_speech_time
 
                                 if timeout_reached:
                                     logger.info("Active mode timeout reached. Transitioning to Sleep/Idle.")
@@ -1774,13 +2088,16 @@ def main() -> None:
                                         intent_classifier=intent_classifier
                                     )
 
-                                    last_speech_time = time.time()
+                                    last_speech_time = time.time()  # Reset after command processed
                                     transition_state(AssistantState.ACTIVE_MODE)
-                                    # Return to MUSIC_MODE if music is playing, otherwise LISTENING
+                                    # Return to SENTRY_SCAN if surveillance active, MUSIC_MODE if music is playing, otherwise LISTENING
                                     if eye_display:
                                         try:
+                                            from src.vision.camera_manager import CameraManager
                                             from src.intent.music_plugin import MusicService
-                                            if MusicService.get_instance().is_playing():
+                                            if CameraManager.get_instance().is_surveillance_active():
+                                                eye_display.set_state(EyeState.SENTRY_SCAN)
+                                            elif MusicService.get_instance().is_playing():
                                                 track = MusicService.get_instance().get_now_playing()
                                                 title = track.title if track else "Music"
                                                 eye_display.set_music_data(title, is_playing=True)
@@ -1799,14 +2116,24 @@ def main() -> None:
                             print("[Morphix] 😴 Waiting for wake word...")
                             mic_stream.clear()
                             last_check_time = time.time()
-                            # Keep DEEP_SLEEP with floating Zzz particles while waiting for next wake word
+                            # Keep DEEP_SLEEP with floating Zzz particles while waiting for next wake word (unless surveillance is active)
                             if eye_display:
                                 try:
-                                    eye_display.set_state(EyeState.DEEP_SLEEP)
+                                    from src.vision.camera_manager import CameraManager
+                                    if CameraManager.get_instance().is_surveillance_active():
+                                        eye_display.set_state(EyeState.SENTRY_SCAN)
+                                    else:
+                                        eye_display.set_state(EyeState.DEEP_SLEEP)
                                 except Exception:
                                     pass
 
         except KeyboardInterrupt:
+            try:
+                from src.vision.camera_manager import CameraManager
+                if CameraManager.get_instance().is_surveillance_active():
+                    CameraManager.get_instance().stop_surveillance()
+            except Exception:
+                pass
             reminder_checker.stop()
             mic_stream.stop()
             if eye_display:

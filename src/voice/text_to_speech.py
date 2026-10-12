@@ -21,14 +21,33 @@ Description:
 import asyncio
 import logging
 import os
+import ssl
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 import edge_tts
+import edge_tts.communicate as _edge_tts_comm
 
 from src.audio.sound_player import SoundPlayer
+
+# ---------------------------------------------------------------------------
+# SSL Certificate Fix for Edge TTS on Windows
+# ---------------------------------------------------------------------------
+# edge_tts.communicate hardcodes its own _SSL_CTX at module import time.
+# On some Windows systems (Python 3.14), Microsoft's speech.platform.bing.com
+# certificate triggers "certificate is not yet valid" because the system trust
+# store or Python's bundled CA chain is stale. We replace _SSL_CTX with a
+# non-verifying context scoped strictly to edge_tts — no other SSL connections
+# in the app are affected.
+try:
+    _patched_ssl_ctx = ssl.create_default_context()
+    _patched_ssl_ctx.check_hostname = False
+    _patched_ssl_ctx.verify_mode = ssl.CERT_NONE
+    _edge_tts_comm._SSL_CTX = _patched_ssl_ctx
+except Exception as _ssl_patch_err:
+    pass  # If patching fails, edge_tts will use its original context
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -188,7 +207,7 @@ class TTSDispatcher:
     # Public API
     # ------------------------------------------------------------------
 
-    def speak(self, text: str) -> bool:
+    def speak(self, text: str, *args, **kwargs) -> bool:
         """
         Synthesizes speech from text using Microsoft Edge TTS (Aarti Neural)
         and plays it through the system speaker via SoundPlayer.
@@ -208,11 +227,6 @@ class TTSDispatcher:
             logger.warning("Cannot speak empty or whitespace-only text.")
             return False
 
-        try:
-            print(f"[Morphix] 🤖 Response: {text}")
-        except UnicodeEncodeError:
-            print("[Morphix] [Robot Response]: (Unicode text)")
-
         # Select voice based on script detection
         if self._is_devanagari(text):
             voice = VOICE_HI_DEVANAGARI
@@ -228,6 +242,13 @@ class TTSDispatcher:
         temp_mp3 = self.temp_audio_dir / f"speech_{timestamp_ms}.mp3"
 
         self._is_speaking = True
+        # Audio ducking: lower music volume while speaking
+        try:
+            from src.intent.music_plugin import MusicService
+            MusicService.get_instance().duck_for_tts()
+        except Exception:
+            pass
+
         try:
             # Run async synthesis in a clean event loop
             success = asyncio.run(self._synthesize_async(text, voice, temp_mp3))
@@ -247,6 +268,13 @@ class TTSDispatcher:
 
         finally:
             self._is_speaking = False
+            # Restore music volume after speaking
+            try:
+                from src.intent.music_plugin import MusicService
+                MusicService.get_instance().restore_after_tts()
+            except Exception:
+                pass
+
             # Always attempt to clean up the temp file
             try:
                 if temp_mp3.exists():

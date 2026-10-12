@@ -72,6 +72,18 @@ Thumbs.db
 desktop.ini
 
 # ==============================================================================
+# Surveillance & Facial Privacy Protections
+# ==============================================================================
+data/surveillance_captures/*
+!data/surveillance_captures/.gitkeep
+data/known_faces/*
+!data/known_faces/.gitkeep
+temp/
+*.jpg
+*.png
+.env
+
+# ==============================================================================
 # Explicitly Tracked Exceptions (Overrides)
 # ==============================================================================
 !README.md

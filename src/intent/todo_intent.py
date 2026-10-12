@@ -36,7 +36,7 @@ class TodoIntentParser:
         # Helper to strip trailing suffixes from task descriptions
         def strip_todo_suffixes(item_text: str) -> str:
             cleaned = re.sub(
-                r"\s+(?:to|in|from|into|on)\s+(?:my\s+)?(?:todo|list)(?:\s+list)?$",
+                r"\s+(?:to|in|into|on|from)\s+(?:my\s+)?(?:todo|to-?do|tasks?)(?:\s+list)?$",
                 "",
                 item_text,
                 flags=re.IGNORECASE
@@ -44,8 +44,12 @@ class TodoIntentParser:
             return cleaned.strip()
 
         # 1. CLEAR ALL
-        # Pattern to trigger CLEAR_TODO intent (e.g. "delete all todos", "clear todo list", "saare todo delete kar do")
-        clear_pattern = r"^(?:delete|clear|remove)\s+all\s+(?:my\s+)?todos?(?:\s+list)?$|^(?:clear)\s+(?:my\s+)?todo(?:\s+list)?$|^saare\s+todo\s+(?:delete|hata|clear)(?:\s+(?:kar\s+)?do|\s+karo)?$"
+        # Pattern to trigger CLEAR_TODO intent
+        clear_pattern = (
+            r"^(?:delete|clear|remove|empty)\s+all\s+(?:my\s+)?todos?(?:\s+list)?$"
+            r"|^(?:clear|empty)\s+(?:my\s+)?todo(?:\s+list)?$"
+            r"|^saare\s+todo\s+(?:delete|hata|clear)(?:\s+(?:kar\s+)?do|\s+karo)?$"
+        )
         if re.search(clear_pattern, text_lower):
             return {"intent": "CLEAR_TODO"}
 
@@ -114,7 +118,15 @@ class TodoIntentParser:
 
         # 4. SHOW / READ
         # Match English show/list, and Hindi/Hinglish show (e.g. "mera todo dikhao")
-        show_pattern = r"^(?:show|read|tell|what\s+are|list)\s+(?:me\s+)?(?:my\s+)?todos?(?:\s+list)?$|^(?:mera|mere)?\s*todo\s+(?:dikhao|batao|kya\s+kya\s+hai|kya hai)$"
+        show_pattern = (
+            r"^(?:show|read|tell|what\s+are|list)\s+(?:me\s+)?(?:my\s+)?todos?(?:\s+list)?$"
+            r"|^show\s+me\s+my\s+(?:todos?|tasks?)(?:\s+list)?$"
+            r"|^show\s+to-?do\s+list$"
+            r"|^what(?:'s| is)?\s+on\s+my\s+(?:todos?|tasks?)(?:\s+list)?$"
+            r"|^my\s+(?:todos?|tasks?)\s+list$"
+            r"|^read\s+my\s+todo$"
+            r"|^(?:mera|mere)?\s*todo\s+(?:dikhao|batao|kya\s+kya\s+hai|kya hai)$"
+        )
         if re.search(show_pattern, text_lower):
             return {"intent": "SHOW_TODO"}
 

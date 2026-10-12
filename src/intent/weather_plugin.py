@@ -4,18 +4,20 @@ Morphix Desktop Companion Robot - Weather Intent Plugin & Service
 File: src/intent/weather_plugin.py
 Description:
     Auto-detects user location via IP-API and fetches live weather via Open-Meteo API.
-    Provides non-blocking execution, offline-friendly caching, fallback locations,
-    and bilingual (English/Hindi) spoken responses for Edge TTS.
+    Supports geocoding multi-city voice queries, non-blocking execution, offline-friendly caching,
+    fallback locations, and bilingual (English/Hindi) spoken responses for Edge TTS.
 """
 
 import json
 import logging
+import os
 import re
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from src.intent.intent_classifier import IntentResult, IntentType
 
 # Setup logger for Weather Plugin
@@ -29,10 +31,54 @@ if not logger.handlers:
     logger.propagate = False
 
 
+def extract_city(text: str) -> Optional[str]:
+    """
+    Parses target city name from English and Hinglish voice queries.
+    Strips noise words ("today", "now", "kaisa", "hai", "batao", etc.).
+    Returns clean city name in Title Case (e.g. "Delhi", "Nagpur", "Mumbai") or None.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    cleaned = text.lower().strip()
+
+    # Noise words to strip from candidate city string
+    noise_words = {
+        "today", "now", "right now", "kaisa", "hai", "batao", "bataiye", "batao na",
+        "ka", "ki", "ke", "ko", "par", "mein", "me", "report", "like", "current",
+        "temperature", "weather", "mausam", "temp", "please", "tell", "show",
+        "what", "is", "the", "how", "for", "in", "of", "aaj", "chal", "raha", "haal",
+        "right", "outside", "details"
+    }
+
+    patterns = [
+        # "weather in Delhi", "temperature in Delhi", "weather for Delhi", "weather of Mumbai"
+        r"(?:weather|temperature|temp|mausam)\s+(?:in|for|of|at)\s+([a-zA-Z\s]+)",
+        # "Delhi weather", "Nagpur temperature", "Mumbai mausam"
+        r"([a-zA-Z\s]+)\s+(?:weather|temperature|temp|mausam)",
+        # "Delhi ka weather", "Nagpur ki temperature", "Mumbai me mausam"
+        r"([a-zA-Z\s]+)\s+(?:ka|ki|ke|me|mein)\s+(?:weather|temperature|temp|mausam)",
+        # "in Delhi", "for Bangalore", "of Mumbai"
+        r"(?:in|for|of|at)\s+([a-zA-Z\s]+)$",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, cleaned)
+        if m:
+            candidate = m.group(1).strip()
+            tokens = [w for w in candidate.split() if w not in noise_words]
+            if tokens:
+                city = " ".join(tokens).strip()
+                if len(city) >= 2 and re.match(r"^[a-zA-Z\s]+$", city):
+                    return city.title()
+
+    return None
+
+
 class WeatherService:
     """
     Fetches real-time weather using Open-Meteo (no API key required) and IP-API for auto-location.
-    Includes caching for low-latency / non-blocking execution on Raspberry Pi 4B and Desktop.
+    Includes geocoding for target cities and caching for low-latency execution.
     """
     _instance = None
     _lock = threading.Lock()
@@ -42,7 +88,6 @@ class WeatherService:
         self._loc_cache_time: float = 0.0
         self._cached_weather: Optional[Dict[str, Any]] = None
         self._weather_cache_time: float = 0.0
-        self._fallback_city = "New Delhi"
         self._fallback_lat = 28.6139
         self._fallback_lon = 77.2090
 
@@ -54,12 +99,28 @@ class WeatherService:
                     cls._instance = WeatherService()
         return cls._instance
 
+    def _get_fallback_city(self) -> str:
+        """Dynamically retrieves default city from env or profile config."""
+        city_env = os.getenv("DEFAULT_CITY") or os.getenv("WEATHER_DEFAULT_CITY")
+        if city_env and city_env.strip():
+            return city_env.strip()
+        try:
+            from src.config.profile_manager import load_user_profile
+            profile = load_user_profile()
+            cfg_city = profile.get("default_city") or profile.get("city")
+            if cfg_city and isinstance(cfg_city, str) and cfg_city.strip():
+                return cfg_city.strip()
+        except Exception:
+            pass
+        return "New Delhi"
+
     def get_location(self) -> Dict[str, Any]:
         """Auto-detects city and coordinates via IP lookup with 1-hour caching."""
         now = time.time()
         if self._cached_location and (now - self._loc_cache_time < 3600.0):
             return self._cached_location
 
+        fallback_city = self._get_fallback_city()
         try:
             req = urllib.request.Request(
                 "http://ip-api.com/json/?fields=status,country,city,lat,lon",
@@ -68,7 +129,7 @@ class WeatherService:
             with urllib.request.urlopen(req, timeout=2.5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 if data.get("status") == "success":
-                    city = data.get("city", self._fallback_city)
+                    city = data.get("city", fallback_city)
                     lat = float(data.get("lat", self._fallback_lat))
                     lon = float(data.get("lon", self._fallback_lon))
                     self._cached_location = {"city": city, "lat": lat, "lon": lon}
@@ -76,10 +137,10 @@ class WeatherService:
                     logger.info("Auto-detected location: %s (Lat: %.4f, Lon: %.4f)", city, lat, lon)
                     return self._cached_location
         except Exception as ex:
-            logger.warning("Auto-location lookup failed: %s. Using default %s.", ex, self._fallback_city)
+            logger.warning("Auto-location lookup failed: %s. Using default %s.", ex, fallback_city)
 
         self._cached_location = {
-            "city": self._fallback_city,
+            "city": fallback_city,
             "lat": self._fallback_lat,
             "lon": self._fallback_lon
         }
@@ -89,16 +150,40 @@ class WeatherService:
     def get_weather(self, target_city: Optional[str] = None) -> Dict[str, Any]:
         """
         Fetches current weather from Open-Meteo for auto-detected or target location.
-        Caches results for 10 minutes to avoid redundant API hits.
+        Caches default location weather for 10 minutes.
         """
         now = time.time()
-        if not target_city and self._cached_weather and (now - self._weather_cache_time < 600.0):
+        clean_target = target_city.strip() if (target_city and isinstance(target_city, str) and target_city.strip()) else None
+
+        if not clean_target and self._cached_weather and (now - self._weather_cache_time < 600.0):
             return self._cached_weather
 
-        loc = self.get_location()
-        city = loc["city"]
-        lat = loc["lat"]
-        lon = loc["lon"]
+        city_name = None
+        lat = None
+        lon = None
+
+        if clean_target:
+            try:
+                encoded_city = urllib.parse.quote(clean_target)
+                geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_city}&count=1&language=en&format=json"
+                req = urllib.request.Request(geo_url, headers={"User-Agent": "Morphix/1.0"})
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    geo_data = json.loads(resp.read().decode("utf-8"))
+                    results = geo_data.get("results", [])
+                    if results and len(results) > 0:
+                        top_res = results[0]
+                        city_name = top_res.get("name", clean_target).title()
+                        lat = float(top_res.get("latitude"))
+                        lon = float(top_res.get("longitude"))
+                        logger.info("Geocoded city '%s' -> %s (Lat: %.4f, Lon: %.4f)", clean_target, city_name, lat, lon)
+            except Exception as ex:
+                logger.warning("Geocoding failed for city '%s': %s", clean_target, ex)
+
+        if not city_name or lat is None or lon is None:
+            loc = self.get_location()
+            city_name = loc["city"]
+            lat = loc["lat"]
+            lon = loc["lon"]
 
         try:
             url = (
@@ -116,23 +201,23 @@ class WeatherService:
 
                 condition, desc = self._map_wmo_code(code)
                 res = {
-                    "city": city,
+                    "city": city_name,
                     "temperature": round(temp),
                     "temp_exact": temp,
-                    "condition": condition,  # sunny, cloudy, rainy, stormy, snowy
+                    "condition": condition,
                     "description": desc,
                     "wind_speed": round(wind, 1),
                     "humidity": humidity
                 }
-                if not target_city:
+                if not clean_target:
                     self._cached_weather = res
                     self._weather_cache_time = now
-                logger.info("Fetched weather for %s: %d°C, %s", city, res["temperature"], desc)
+                logger.info("Fetched weather for %s: %d°C, %s", city_name, res["temperature"], desc)
                 return res
         except Exception as ex:
             logger.error("Failed to fetch weather from Open-Meteo: %s", ex)
             return {
-                "city": city,
+                "city": city_name or "New Delhi",
                 "temperature": 25,
                 "temp_exact": 25.0,
                 "condition": "sunny",
@@ -141,7 +226,7 @@ class WeatherService:
                 "humidity": 50
             }
 
-    def _map_wmo_code(self, code: int) -> tuple[str, str]:
+    def _map_wmo_code(self, code: int) -> Tuple[str, str]:
         """Maps WMO Weather interpretation code to icon category and description."""
         if code == 0:
             return "sunny", "clear sky"
@@ -166,7 +251,6 @@ class WeatherService:
         city = weather_data["city"]
         temp = weather_data["temperature"]
         desc = weather_data["description"]
-        wind = weather_data["wind_speed"]
 
         if is_hindi:
             return f"{city} mein abhi mausam {desc} hai, aur temperature {temp} degree Celsius hai."
@@ -182,39 +266,21 @@ class WeatherIntentPlugin:
 
     def match(self, text: str) -> Optional[IntentResult]:
         lowercased = text.lower().strip()
+        city = extract_city(text)
 
-        weather_patterns = [
-            r"^(?:what(?:'s| is) (?:the )?)?weather(?: (?:like|report))?(?: in (?P<city>.+))?$",
-            r"^(?:how(?:'s| is) (?:the )?)?weather(?: today)?$",
-            r"^(?:show|tell) (?:me )?(?:the )?weather(?: report)?$",
-            r"^what is the temperature(?: right now| today)?$",
-            r"^current temperature$",
-            r"^temperature (?:kitna|kya) hai$",
-            r"^(?:aaj )?(?:ka )?mausam (?:kaisa|kya) hai$",
-            r"^aaj weather kaisa hai$",
-            r"^weather kaisa hai$",
-            r"^temperature kitna chal raha hai$",
-            r"^mausam ka haal(?: batao)?$"
-        ]
+        is_weather_query = (
+            "weather" in lowercased
+            or "mausam" in lowercased
+            or ("temperature" in lowercased and any(k in lowercased for k in ["what", "tell", "kya", "kitna", "current", "show", "in", "for", "of", "how"]))
+            or "temp" in lowercased
+        )
 
-        for pat in weather_patterns:
-            m = re.match(pat, lowercased)
-            if m:
-                is_hindi = any(w in lowercased for w in ["mausam", "kaisa", "kitna", "kya", "aaj", "chal raha", "haal"])
-                return IntentResult(
-                    intent=IntentType.GET_WEATHER,
-                    parameters={"is_hindi": is_hindi, "query": lowercased},
-                    confidence=0.95,
-                    raw_text=text
-                )
-
-        # Keyword checks
-        if "weather" in lowercased or "mausam" in lowercased or ("temperature" in lowercased and any(k in lowercased for k in ["what", "tell", "kya", "kitna", "current", "show"])):
-            is_hindi = any(w in lowercased for w in ["mausam", "kaisa", "kitna", "kya", "aaj", "chal raha", "haal"])
+        if is_weather_query:
+            is_hindi = any(w in lowercased for w in ["mausam", "kaisa", "kitna", "kya", "aaj", "chal raha", "haal", "batao"])
             return IntentResult(
                 intent=IntentType.GET_WEATHER,
-                parameters={"is_hindi": is_hindi, "query": lowercased},
-                confidence=0.90,
+                parameters={"is_hindi": is_hindi, "city": city, "query": lowercased},
+                confidence=0.95 if city else 0.90,
                 raw_text=text
             )
 

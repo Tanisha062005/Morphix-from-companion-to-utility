@@ -78,5 +78,33 @@ class TestMusicPlugin(unittest.TestCase):
         self.assertEqual(res.parameters.get("query"), "calm music")
 
 
+    def test_audio_ducking(self) -> None:
+        self.service._volume = 0.8
+        self.service._pre_duck_volume = 0.8
+
+        # Mock is_playing to True for ducking test
+        with patch.object(self.service, 'is_playing', return_value=True):
+            self.service.duck_for_tts()
+            self.assertEqual(self.service._volume, 0.18)
+            self.assertTrue(self.service._is_ducked)
+
+            self.service.restore_after_tts()
+            self.assertEqual(self.service._volume, 0.8)
+            self.assertFalse(self.service._is_ducked)
+
+    def test_next_track_queue(self) -> None:
+        from src.intent.music_plugin import TrackInfo
+        # Test fallback when no history
+        q_fallback = self.service._build_next_query()
+        self.assertEqual(q_fallback, "top trending songs today")
+
+        # Test history push and smart next query
+        self.service._push_history("play believer", "Believer - Imagine Dragons")
+        self.service.current_track = TrackInfo(title="Believer - Imagine Dragons", url="http://test")
+        q_next = self.service._build_next_query()
+        self.assertIn("Imagine Dragons", q_next)
+
+
 if __name__ == "__main__":
     unittest.main()
+

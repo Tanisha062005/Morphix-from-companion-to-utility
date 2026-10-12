@@ -66,11 +66,45 @@ class TestFestivalPlugin(unittest.TestCase):
         res3 = self.plugin.match("happy diwali")
         self.assertIsNotNone(res3)
         self.assertEqual(res3.intent, IntentType.GET_FESTIVAL)
+        self.assertEqual(res3.parameters.get("overlay_tag"), "FESTIVAL_DIWALI")
 
-        res4 = self.plugin.match("ganpati bappa morya")
+        # User Log Bug 3: "i just wished you ganesh chaturthi nothing else"
+        res4 = self.plugin.match("i just wished you ganesh chaturthi nothing else")
         self.assertIsNotNone(res4)
         self.assertEqual(res4.intent, IntentType.GET_FESTIVAL)
+        self.assertEqual(res4.parameters.get("overlay_tag"), "FESTIVAL_GANESH")
+
+        res5 = self.plugin.match("happy holi")
+        self.assertIsNotNone(res5)
+        self.assertEqual(res5.parameters.get("overlay_tag"), "FESTIVAL_HOLI")
+
+        res6 = self.plugin.match("happy independence day")
+        self.assertIsNotNone(res6)
+        self.assertEqual(res6.parameters.get("overlay_tag"), "FESTIVAL_INDEPENDENCE")
+
+    def test_festival_handle_triggers_overlay(self):
+        from unittest.mock import MagicMock
+        mock_disp = MagicMock()
+        mock_disp.is_alive.return_value = True
+
+        res = self.plugin.match("i just wished you ganesh chaturthi")
+        response = self.plugin.handle(res, display=mock_disp)
+        mock_disp.set_overlay.assert_called_once_with("FESTIVAL_GANESH", timeout=10.0)
+        self.assertIn("Ganpati Bappa Morya", response)
+
+    def test_birthday_parsing_formats(self):
+        cases = [
+            ("06-20", (6, 20)),
+            ("20-06", (6, 20)),
+            ("2005-06-20", (6, 20)),
+            ("20-06-2005", (6, 20)),
+            ("06/20", (6, 20)),
+        ]
+        for fmt_str, expected in cases:
+            res = FestivalService._parse_birthday_month_day(fmt_str)
+            self.assertEqual(res, expected, f"Failed parsing format: {fmt_str}")
 
 
 if __name__ == "__main__":
     unittest.main()
+

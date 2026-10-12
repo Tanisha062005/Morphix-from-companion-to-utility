@@ -49,6 +49,14 @@ class IntentType(str, Enum):
     UNMUTE_VOLUME = "UNMUTE_VOLUME"
     GET_SYSTEM_HEALTH = "GET_SYSTEM_HEALTH"
     GET_FESTIVAL = "GET_FESTIVAL"
+    SET_USER_NAME = "SET_USER_NAME"
+    GET_USER_NAME = "GET_USER_NAME"
+    ENROLL_FACE = "ENROLL_FACE"
+    START_SURVEILLANCE = "START_SURVEILLANCE"
+    STOP_SURVEILLANCE = "STOP_SURVEILLANCE"
+    GET_SURVEILLANCE_STATUS = "GET_SURVEILLANCE_STATUS"
+    DELETE_SURVEILLANCE_CAPTURES = "DELETE_SURVEILLANCE_CAPTURES"
+    PLAY_RPS = "PLAY_RPS"
     UNKNOWN = "UNKNOWN"
 
 
@@ -72,29 +80,18 @@ class TodoIntentPlugin:
 
         # 1. CLEAR_TODO
         clear_patterns = [
-            r"clear (my )?(to-?do|tasks?)( list)?$",
-            r"delete all (tasks|to-?dos?)$",
-            r"remove all (tasks|to-?dos?)$",
-            r"^saare\s+todo\s+(?:delete|hata|clear)(?:\s+(?:kar\s+)?do|\s+karo)?$"
+            r"clear (?:my )?(?:to-?do|todo|tudu|tasks?)(?: list)?$",
+            r"clear (?:todo|tudu)$",
+            r"empty (?:my )?(?:to-?do|todo|tudu|tasks?)(?: list)?$",
+            r"delete all (?:tasks|to-?dos?|tudus?)$",
+            r"remove all (?:tasks|to-?dos?|tudus?)$",
+            r"^saare\s+(?:todo|tudu|tasks?)\s+(?:delete|hata|clear)(?:\s+(?:kar\s+)?do|\s+karo)?$"
         ]
         for pat in clear_patterns:
             if re.search(pat, lowercased):
                 return IntentResult(intent=IntentType.CLEAR_TODO, confidence=1.0, raw_text=text)
 
-        # 2. SHOW_TODO
-        show_patterns = [
-            r"show (my )?(to-?do|tasks?)( list)?$",
-            r"what are my (tasks|to-?dos?)$",
-            r"read (my )?(to-?do|tasks?)( list)?$",
-            r"list (my )?tasks$",
-            r"get (my )?tasks$",
-            r"^(?:mera|mere)?\s*todo\s+(?:dikhao|batao|kya\s+kya\s+hai|kya hai)$"
-        ]
-        for pat in show_patterns:
-            if re.search(pat, lowercased):
-                return IntentResult(intent=IntentType.SHOW_TODO, confidence=1.0, raw_text=text)
-
-        # 3. COMPLETE_TODO
+        # 2. COMPLETE_TODO
         complete_patterns = [
             r"i completed (?P<task>.+)",
             r"mark (?P<task>.+) as done",
@@ -106,7 +103,7 @@ class TodoIntentPlugin:
             m = re.match(pat, lowercased)
             if m:
                 task_str = m.group("task").strip()
-                task_str = re.sub(r"\s+from (my )?(to-?do|tasks?)( list)?$", "", task_str).strip()
+                task_str = re.sub(r"\s+from (?:my )?(?:to-?do|todo|tudu|tasks?)(?: list)?$", "", task_str).strip()
                 return IntentResult(
                     intent=IntentType.COMPLETE_TODO,
                     parameters={"task": task_str},
@@ -114,15 +111,15 @@ class TodoIntentPlugin:
                     raw_text=text
                 )
 
-        # 4. DELETE_TODO
+        # 3. DELETE_TODO
         delete_patterns = [
             r"delete task (?P<task>.+)",
-            r"delete (?P<task>.+) from (my )?(to-?do|tasks?)( list)?",
+            r"delete (?P<task>.+) from (?:my )?(?:to-?do|todo|tudu|tasks?)(?: list)?",
             r"delete (?P<task>.+)",
             r"remove task (?P<task>.+)",
-            r"remove (?P<task>.+) from (my )?(to-?do|tasks?)( list)?",
+            r"remove (?P<task>.+) from (?:my )?(?:to-?do|todo|tudu|tasks?)(?: list)?",
             r"remove (?P<task>.+)",
-            r"^(?P<task>.+?)\s+(?:todo|list)\s+(?:se\s+)?(?:delete|hata|remove)(?:\s+(?:kar\s+)?do|\s*karo)?$"
+            r"^(?P<task>.+?)\s+(?:todo|tudu|list)\s+(?:se\s+)?(?:delete|hata|remove)(?:\s+(?:kar\s+)?do|\s*karo)?$"
         ]
         for pat in delete_patterns:
             m = re.match(pat, lowercased)
@@ -136,27 +133,76 @@ class TodoIntentPlugin:
                         raw_text=text
                     )
 
-        # 5. ADD_TODO
-        add_patterns = [
-            r"add (?P<task>.+) to (?:my )?todo",
-            r"add (?P<task>.+) to (my )?(to-?do|tasks?)( list)?",
+        # 4. Explicit ADD_TODO
+        add_patterns_explicit = [
+            r"add (?P<task>.+) to (?:my )?(?:to-?do|todo|tudu)(?:\s+list)?",
+            r"add (?P<task>.+) in (?:my )?(?:to-?do|todo|tudu)(?:\s+list)?",
             r"add task (?P<task>.+)",
-            r"add (?P<task>.+)",
-            r"(?:todo|list) mein (?P<task>.+) (?:daal do|add karo|likh do)",
-            r"^(?:todo|list)\s+(?:mein|me)\s+(?P<task>.+?)\s+(?:daal do|add karo|likh do|add kar do|karo)$",
-            r"टूडू में (?P<task>.+) (?:जोड़ो|डालो)"
+            r"(?:to-?do|todo|tudu|list) mein (?P<task>.+) (?:daal do|add karo|likh do)",
+            r"^(?:to-?do|todo|tudu|list)\s+(?:mein|me)\s+(?P<task>.+?)\s+(?:daal do|add karo|likh do|add kar do|karo)$",
+            r"(?:टूडू|टुडू)\s+में\s+(?P<task>.+)\s+(?:जोड़ो|डालो)"
         ]
-        for pat in add_patterns:
+        _todo_suffix_re = re.compile(
+            r"\s+(?:in|to|into|on)\s+(?:my\s+)?(?:to-?do|todo|tudu|tasks?)(?:\s+list)?$",
+            re.IGNORECASE
+        )
+        for pat in add_patterns_explicit:
             m = re.match(pat, lowercased)
             if m:
                 task_str = m.group("task").strip()
+                task_str = _todo_suffix_re.sub("", task_str).strip()
                 if not any(k in task_str for k in ["remind", "reminder", "reminders"]):
                     return IntentResult(
                         intent=IntentType.ADD_TODO,
                         parameters={"task": task_str},
-                        confidence=0.90,
+                        confidence=0.95,
                         raw_text=text
                     )
+
+        # 5. SHOW_TODO (Hinglish & English)
+        show_patterns = [
+            r".*(?:show|dikha|bata).*(?:to-?do|todo|tudu|list).*",
+            r".*(?:meri|mera|mere|my).*(?:to-?do|todo|tudu).*",
+            r"show (?:my )?(?:to-?do|todo|tudu|tasks?)(?: list)?$",
+            r"show me my (?:to-?do|todo|tudu|tasks?)(?: list)?$",
+            r"show (?:to-?do|todo|tudu) list$",
+            r"^what(?:'s| is)? on my (?:to-?do|todo|tudu|tasks?)(?: list)?$",
+            r"^my (?:to-?do|todo|tudu|tasks?) list$",
+            r"what are my (?:tasks|to-?dos?|tudus?)$",
+            r"read (?:my )?(?:to-?do|todo|tudu|tasks?)(?: list)?$",
+            r"read (?:my )?(?:todo|tudu)$",
+            r"list (?:my )?tasks$",
+            r"get (?:my )?tasks$",
+            r"show (?:todo|tudu)$",
+            r"read (?:todo|tudu)$",
+            r"(?:mera|mere|meri)\s+(?:todo|tudu)\s+dikhao$",
+            r"^(?:mera|mere|meri)?\s*(?:todo|tudu)\s+(?:dikhao|dikha|batao|bata|kya\s+kya\s+hai|kya hai).*$",
+            r".*(?:to-?do|todo|tudu)\s+(?:list\s+)?(?:dikha|dikhao|bata|batao).*",
+            r".*(?:display|screen)\s+(?:per|par|pe)\s+(?:to-?do|todo|tudu|tasks?).*"
+        ]
+        if not re.match(r"^(?:add|insert|likh|daal)\b", lowercased):
+            for pat in show_patterns:
+                if re.search(pat, lowercased):
+                    return IntentResult(intent=IntentType.SHOW_TODO, confidence=1.0, raw_text=text)
+
+        # 6. Generic ADD_TODO (fallback)
+        generic_add_patterns = [
+            r"add (?P<task>.+)"
+        ]
+        for pat in generic_add_patterns:
+            m = re.match(pat, lowercased)
+            if m:
+                task_str = m.group("task").strip()
+                task_str = _todo_suffix_re.sub("", task_str).strip()
+                if not any(k in task_str for k in ["remind", "reminder", "reminders"]):
+                    return IntentResult(
+                        intent=IntentType.ADD_TODO,
+                        parameters={"task": task_str},
+                        confidence=0.85,
+                        raw_text=text
+                    )
+
+        return None
 
         return None
 
@@ -172,10 +218,19 @@ class ReminderIntentPlugin:
 
         # 1. SHOW_REMINDERS
         show_rem_patterns = [
-            r"show (my )?reminders$",
-            r"what are my reminders$",
-            r"read (my )?reminders$",
-            r"list (my )?reminders$"
+            r"^show (?:me )?(?:my )?(?:upcoming )?reminders?\??$",
+            r"^what are my (?:upcoming )?reminders\??$",
+            r"^read (?:me )?(?:my )?reminders?\??$",
+            r"^list (?:my )?reminders?\??$",
+            r"^show (?:my )?schedule\??$",
+            r"^check (?:my |the )?reminders?(?:\s+for\s+me)?(?:\s+right\s+now)?\??$",
+            r"^(?:do\s+i\s+have\s+)?any\s+(?:kind\s+of\s+)?reminders(?:\s+for\s+me)?(?:\s+right\s+now)?\??$",
+            r"^do\s+i\s+have\s+(?:any\s+)?(?:kind\s+of\s+)?reminders?(?:\s+for\s+me)?(?:\s+right\s+now)?\??$",
+            r"^did i have any reminders\??$",
+            r"^(?:mere|mera)\s+reminders?\s+(?:dikhao|batao|check\s+karo)\??$",
+            r"^(?:kya\s+)?(?:mera\s+|mere\s+)?(?:koi\s+)?reminders?\s+(?:hai|batao|dikhao)(?:\s+kya)?\??$",
+            r"^(?:kya\s+)?(?:koi\s+)?(?:mera\s+|mere\s+)?reminders?\s+(?:hai|batao|dikhao)(?:\s+kya)?\??$",
+            r"^(?:kya\s+)?koi\s+reminder\s+hai\??$"
         ]
         for pat in show_rem_patterns:
             if re.search(pat, lowercased):
@@ -269,13 +324,35 @@ class IntentClassifier:
     def __init__(self) -> None:
         self._plugins: List[Any] = []
         # Register default Morphix Phase 1 & 2 plugins
-        self.register_plugin(TodoIntentPlugin())
-        self.register_plugin(ReminderIntentPlugin())
+        try:
+            from src.intent.todo_plugin import TodoIntentPlugin as ExtTodoPlugin
+            self.register_plugin(ExtTodoPlugin())
+        except Exception:
+            self.register_plugin(TodoIntentPlugin())
+
+        try:
+            from src.intent.reminder_plugin import ReminderIntentPlugin as ExtReminderPlugin
+            self.register_plugin(ExtReminderPlugin())
+        except Exception:
+            self.register_plugin(ReminderIntentPlugin())
+
         try:
             from src.intent.weather_plugin import WeatherIntentPlugin
             self.register_plugin(WeatherIntentPlugin())
         except Exception as e:
             logger.warning("Could not load WeatherIntentPlugin: %s", str(e))
+
+        try:
+            from src.intent.profile_plugin import ProfileIntentPlugin
+            self.register_plugin(ProfileIntentPlugin())
+        except Exception as e:
+            logger.warning("Could not load ProfileIntentPlugin: %s", str(e))
+
+        try:
+            from src.intent.surveillance_plugin import SurveillanceIntentPlugin
+            self.register_plugin(SurveillanceIntentPlugin())
+        except Exception as e:
+            logger.warning("Could not load SurveillanceIntentPlugin: %s", str(e))
 
         try:
             from src.intent.music_plugin import MusicIntentPlugin
@@ -301,6 +378,12 @@ class IntentClassifier:
         except Exception as e:
             logger.warning("Could not load FestivalIntentPlugin: %s", str(e))
 
+        try:
+            from src.intent.rps_game_plugin import RPSGamePlugin
+            self.register_plugin(RPSGamePlugin())
+        except Exception as e:
+            logger.warning("Could not load RPSGamePlugin: %s", str(e))
+
     def register_plugin(self, plugin: Any) -> None:
         """
         Registers a new intent plugin handler.
@@ -309,6 +392,120 @@ class IntentClassifier:
         """
         self._plugins.append(plugin)
         logger.info("Registered intent plugin: %s", plugin.__class__.__name__)
+
+    def _intercept_hardware_and_surveillance(self, text: str) -> Optional[IntentResult]:
+        """
+        Strict Fast-Path Local Routing for Surveillance, Face Enrollment,
+        and User Profile commands. Guarantees 100% offline local resolution
+        and prevents hardware commands from ever falling through to Groq/LLM.
+        """
+        import re
+        lowered = text.lower().strip()
+        is_hindi = bool(re.search(r'\b(karo|kar do|mera|kya|hai|aa gaya|wapas|bulao|chehra|rakhwali|kamre|chalu|band)\b', lowered))
+
+        # 0. Rock-Paper-Scissors Fast-Path
+        rps_keywords = [
+            "rock paper scissors", "rock paper scissor", "stone paper scissors",
+            "stone paper scissor", "play rps", "lets play rps", "khelo rock paper",
+            "khelte hain rock paper", "khelte hain stone paper", "play rock paper"
+        ]
+        if any(kw in lowered for kw in rps_keywords):
+            return IntentResult(
+                intent=IntentType.PLAY_RPS,
+                parameters={"is_hindi": is_hindi},
+                confidence=0.99,
+                raw_text=text,
+            )
+
+        # 1. Face Enrollment
+        enroll_keywords = [
+            "register my face", "enroll my face", "face scan", "scan my face",
+            "mera face", "chehra scan", "capture my face", "scan face", "register face",
+            "enroll face", "mera chehra", "add my face"
+        ]
+        if any(kw in lowered for kw in enroll_keywords):
+            return IntentResult(
+                intent=IntentType.ENROLL_FACE,
+                parameters={"is_hindi": is_hindi},
+                confidence=0.99,
+                raw_text=text,
+            )
+
+        # 2. Profile / Name Identification
+        set_name_match = re.search(r'\b(?:my name is|call me|mera naam)\s+([a-zA-Z\u0900-\u097F]+)', lowered)
+        if set_name_match:
+            name = set_name_match.group(1).title()
+            if name.lower() not in {"what", "who", "kya", "hai", "is", "listening", "guard", "mode"}:
+                return IntentResult(
+                    intent=IntentType.SET_USER_NAME,
+                    parameters={"name": name, "is_hindi": is_hindi},
+                    confidence=0.99,
+                    raw_text=text,
+                )
+
+        if any(phrase in lowered for phrase in ["who am i", "what is my name", "what's my name", "mera naam kya hai", "main kaun hoon"]):
+            return IntentResult(
+                intent=IntentType.GET_USER_NAME,
+                parameters={"is_hindi": is_hindi},
+                confidence=0.99,
+                raw_text=text,
+            )
+
+        # 3. Surveillance Snapshot & Log Deletion
+        delete_captures_keywords = [
+            "delete surveillance images", "delete surveillance photos", "delete surveillance captures",
+            "clear captured photos", "clear captures", "clear surveillance images", "clear surveillance photos",
+            "delete intruder photos", "delete intruder images", "delete photos", "delete images",
+            "delete captures", "remove surveillance photos", "remove surveillance captures",
+            "surveillance photos delete", "surveillance captures delete", "photos delete", "images delete"
+        ]
+        if any(kw in lowered for kw in delete_captures_keywords) or (
+            ("delete" in lowered or "clear" in lowered or "remove" in lowered or "hata" in lowered) and
+            ("photo" in lowered or "photos" in lowered or "image" in lowered or "images" in lowered or "capture" in lowered or "captures" in lowered or "intruder" in lowered) and
+            not any(t in lowered for t in ["todo", "task", "reminder", "reminders"])
+        ):
+            return IntentResult(
+                intent=IntentType.DELETE_SURVEILLANCE_CAPTURES,
+                parameters={"is_hindi": is_hindi},
+                confidence=0.99,
+                raw_text=text,
+            )
+
+        # 4. Surveillance & Guard Controls
+        surveillance_keywords = [
+            "surveillance", "guard mode", "guarding", "watch my room", "security mode", "rakhwali",
+            "room ki surveillance", "room pe nazar"
+        ]
+        has_surveillance_kw = any(kw in lowered for kw in surveillance_keywords) or (
+            ("guard" in lowered or "security" in lowered) and ("start" in lowered or "stop" in lowered or "mode" in lowered or "on" in lowered or "off" in lowered or "chalu" in lowered or "band" in lowered)
+        )
+
+        if has_surveillance_kw or "i am back" in lowered or "wapas aa gaya" in lowered or "i'm back" in lowered:
+            # Stop surveillance
+            if any(stop_kw in lowered for stop_kw in ["stop", "deactivate", "disable", "turn off", "band", "off", "back", "wapas", "cancel"]):
+                return IntentResult(
+                    intent=IntentType.STOP_SURVEILLANCE,
+                    parameters={"is_hindi": is_hindi},
+                    confidence=0.99,
+                    raw_text=text,
+                )
+            # Surveillance status
+            if any(stat_kw in lowered for stat_kw in ["status", "report", "check", "anyone", "intruder", "koi aaya"]):
+                return IntentResult(
+                    intent=IntentType.GET_SURVEILLANCE_STATUS,
+                    parameters={"is_hindi": is_hindi},
+                    confidence=0.99,
+                    raw_text=text,
+                )
+            # Otherwise default to Start surveillance
+            return IntentResult(
+                intent=IntentType.START_SURVEILLANCE,
+                parameters={"is_hindi": is_hindi},
+                confidence=0.99,
+                raw_text=text,
+            )
+
+        return None
 
     def classify(self, text: str) -> IntentResult:
         """
@@ -321,6 +518,12 @@ class IntentClassifier:
             return IntentResult(intent=IntentType.UNKNOWN, confidence=0.0, raw_text="")
 
         clean_text = text.strip()
+
+        # Step 0: Fast-Path Local Hardware & Surveillance Interceptor
+        fast_res = self._intercept_hardware_and_surveillance(clean_text)
+        if fast_res is not None:
+            logger.info("Fast-Path intercept: '%s' -> intent '%s' (Confidence: %.2f)", clean_text, fast_res.intent.value, fast_res.confidence)
+            return fast_res
 
         for plugin in self._plugins:
             try:

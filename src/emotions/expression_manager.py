@@ -9,7 +9,8 @@ Description:
     controlling display hardware or external rendering engines.
 """
 
-from typing import Dict, List
+import threading
+from typing import Any, Dict, List, Optional
 
 
 class ExpressionManager:
@@ -18,6 +19,17 @@ class ExpressionManager:
     """
 
     DEFAULT_EXPRESSION: str = "Neutral"
+    _instance: Optional["ExpressionManager"] = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "ExpressionManager":
+        """Singleton accessor for shared ExpressionManager instance."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
 
     def __init__(self, initial_expression: str = DEFAULT_EXPRESSION) -> None:
         """
@@ -25,6 +37,7 @@ class ExpressionManager:
 
         :param initial_expression: Starting expression name (default: "Neutral").
         """
+        self._current_expression: str = self.DEFAULT_EXPRESSION
         # Internal dictionary of supported expressions and their properties
         self._expressions: Dict[str, Dict[str, str]] = {
             "Neutral": {
@@ -136,3 +149,26 @@ class ExpressionManager:
         :return: List of expression name strings.
         """
         return list(self._expressions.keys())
+
+    def to_eye_state(self) -> Any:
+        """
+        Maps the current expression to the corresponding EyeState enum value for EyeAnimator.
+        """
+        try:
+            from src.display.eye_animator import EyeState
+            mapping = {
+                "Neutral": EyeState.IDLE_NEUTRAL,
+                "Happy": EyeState.HAPPY,
+                "Sad": EyeState.SICK_COLD,
+                "Angry": EyeState.ANGRY,
+                "Thinking": EyeState.THINKING,
+                "Sleeping": EyeState.DEEP_SLEEP,
+                "Listening": EyeState.LISTENING,
+                "Excited": EyeState.HEART_EYES,
+                "Confused": EyeState.CONFUSED,
+                "Protective": EyeState.SENTRY_SCAN,
+            }
+            return mapping.get(self._current_expression, EyeState.IDLE_NEUTRAL)
+        except Exception:
+            return None
+

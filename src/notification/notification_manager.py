@@ -41,10 +41,26 @@ class NotificationSender(ABC):
         pass
 
 
+class DisplayNotificationSender(NotificationSender):
+    """
+    Notification channel that renders an active reminder card overlay on the OLED display.
+    """
+
+    def send_notification(self, message: str, trigger_time_str: str, current_time_str: str) -> None:
+        from src.display.eye_animator import get_active_display
+        disp = get_active_display()
+        if disp:
+            try:
+                disp.show_reminder_overlay(title=message, due_time=trigger_time_str, timeout=6.0)
+                logger.info("Rendered reminder notification card overlay on display.")
+            except Exception as e:
+                logger.error("Failed rendering display reminder notification: %s", str(e))
+
+
 class ConsoleNotificationSender(NotificationSender):
     """
-    Notification sender implementing sound playback, TTS speaking, and console printout.
-    Sequence execution: Bark -> Piper (TTS) -> Console print.
+    Notification sender implementing sound playback, TTS speaking, display overlay, and console printout.
+    Sequence execution: Display Card + Bark -> TTS Speaks -> Console print.
     """
 
     def __init__(self, sound_player: Any, tts: Any, wake_sound_path: str) -> None:
@@ -61,24 +77,47 @@ class ConsoleNotificationSender(NotificationSender):
 
     def send_notification(self, message: str, trigger_time_str: str, current_time_str: str) -> None:
         """
-        Triggers notification sequence in exact order: Bark -> Piper (TTS) -> Console print.
+        Triggers notification sequence in exact order: Display Card + Bark -> TTS Speaks -> Console print.
         """
-        # 1. Play Bark Sound (synchronously/blocking where possible)
+        # 1. Trigger Display Card Overlay (if display animator is running)
+        from src.display.eye_animator import get_active_display
+        disp = get_active_display()
+        if disp:
+            try:
+                disp.show_reminder_overlay(title=message, due_time=trigger_time_str, timeout=6.0)
+            except Exception as e:
+                logger.warning("Display overlay notification failed: %s", str(e))
+
+        # 2. Play Bark Sound (synchronously/blocking where possible)
         logger.info("Executing sequence step 1: Play Bark.")
         try:
             self.sound_player.play_sound(self.wake_sound_path)
         except Exception as e:
             logger.error("Sound playback failed: %s", str(e))
 
-        # 2. Piper Speaks
-        logger.info("Executing sequence step 2: Piper TTS Speaks.")
-        spoken_text = f"Tanisha, it's time to {message}."
+        # 3. TTS Speaks with language detection and dynamic user name
+        logger.info("Executing sequence step 2: TTS Speaks.")
+        try:
+            from src.config.profile_manager import get_primary_user
+            user_name = get_primary_user()
+        except Exception:
+            user_name = "there"
+
+        # Check for Devanagari characters or Hindi keywords
+        is_hindi = any('\u0900' <= ch <= '\u097f' for ch in message) or any(
+            w in message.lower() for w in ['karo', 'karne', 'lena', 'dena', 'batao', 'jao', 'khana', 'peena']
+        )
+        if is_hindi:
+            spoken_text = f"{user_name}, aapko {message} yaad dilana tha."
+        else:
+            spoken_text = f"{user_name}, it's time to {message}."
+
         try:
             self.tts.speak(spoken_text)
         except Exception as e:
             logger.error("TTS output failed: %s", str(e))
 
-        # 3. Print Console Notification
+        # 4. Print Console Notification
         logger.info("Executing sequence step 3: Print Console Notification.")
         print("\n" + "=" * 40)
         print("REMINDER")
@@ -110,3 +149,4 @@ class NotificationManager:
                 sender.send_notification(message, trigger_time_str, current_time_str)
             except Exception as e:
                 logger.error("Failed sending notification via %s: %s", sender.__class__.__name__, str(e))
+

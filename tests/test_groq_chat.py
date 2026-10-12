@@ -1,4 +1,4 @@
-"""
+﻿"""
 Morphix Desktop Companion Robot - Groq Conversational Brain Test Suite
 ======================================================================
 File: tests/test_groq_chat.py
@@ -37,7 +37,7 @@ class TestGroqChatManager(unittest.TestCase):
     def test_init(self) -> None:
         mgr = GroqChatManager()
         self.assertIsNotNone(mgr.client)
-        self.assertEqual(mgr.model, "openai/gpt-oss-120b")
+        self.assertEqual(mgr.model, "qwen/qwen3.8-27b")
         self.assertEqual(len(mgr.history), 0)
 
     def test_chat_success(self) -> None:

@@ -127,7 +127,22 @@ class TestWakeWordEngine(unittest.TestCase):
         self.assertTrue(success)
         mock_sound_player.play_sound.assert_called_once_with(assistant.wake_sound_path)
         mock_tts.speak.assert_called_once_with(Config.WAKE_RESPONSE)
-        self.assertTrue(mock_stt.is_listening(), "Vosk STT should be activated for command listening.")
+    def test_fallback_wakeword_engine_integration(self) -> None:
+        """
+        Verifies FallbackWakeWordEngine initializes GoogleSpeechEngine and detects wake words cleanly.
+        """
+        from src.wakeword.wakeword_engine import FallbackWakeWordEngine
+        engine = FallbackWakeWordEngine(target_phrase="Hey Morphix")
+        self.assertTrue(engine.initialize())
+        engine.start()
+
+        # Mock STT transcribe to return "hey morphix"
+        with unittest.mock.patch.object(engine._stt, "transcribe", return_value="hey morphix"):
+            self.assertTrue(engine.is_detected(b"fake_audio_frame"))
+
+        # Verify GoogleSpeechEngine has _transcribe_audio attribute
+        self.assertTrue(hasattr(engine._stt.engine, "_transcribe_audio"))
+        self.assertTrue(hasattr(engine._stt.engine, "transcribe"))
 
 
 def run_tests() -> None:

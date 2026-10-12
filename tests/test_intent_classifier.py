@@ -99,12 +99,33 @@ class TestIntentClassifier(unittest.TestCase):
             "Show my reminders",
             "What are my reminders",
             "Read my reminders",
-            "List my reminders"
+            "List my reminders",
+            "do I have any kind of reminders right now",
+            "any reminders for me",
+            "check my reminders",
+            "kya koi reminder hai",
+            "mere reminders dikhao",
+            "kya mera koi reminder hai"
         ]
         for command in examples:
             with self.subTest(command=command):
                 res = self.classifier.classify(command)
                 self.assertEqual(res.intent, IntentType.SHOW_REMINDERS)
+
+    def test_delete_surveillance_captures_intents(self) -> None:
+        examples = [
+            "delete surveillance images",
+            "clear captured photos",
+            "delete intruder photos",
+            "delete photos",
+            "clear captures",
+            "surveillance photos delete karo",
+            "delete images",
+        ]
+        for command in examples:
+            with self.subTest(command=command):
+                res = self.classifier.classify(command)
+                self.assertEqual(res.intent, IntentType.DELETE_SURVEILLANCE_CAPTURES)
 
     def test_unknown_intents(self) -> None:
         unknown_commands = [

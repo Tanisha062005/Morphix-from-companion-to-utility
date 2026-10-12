@@ -25,6 +25,15 @@ class Config:
     DEVELOPER_NAME: str = "Developer"
     GEMINI_ENABLED: bool = False
 
+    @classmethod
+    def get_primary_user(cls) -> str:
+        """Dynamically fetches primary user name from profile manager config."""
+        try:
+            from src.config.profile_manager import get_primary_user
+            return get_primary_user()
+        except Exception:
+            return "User"
+
     # -------------------------------------------------------------------------
     # 2. Personality Settings
     # -------------------------------------------------------------------------
@@ -41,12 +50,11 @@ class Config:
     WAKE_SOUND: str = "assets/sounds/morphix_voice.wav"
     STT_MODEL: str = os.getenv("MODEL", "base.en")
     WHISPER_MODELS_DIR: str = "models/whisper"
-    WAKE_WORD_THRESHOLD: float = 82.0
     ACTIVE_MODE_TIMEOUT: float = 15.0
 
     # Wake Word Pipeline Configuration
     WAKE_PHRASE: str = "hey morphix"
-    SIMILARITY_THRESHOLD: float = 0.62
+    SIMILARITY_THRESHOLD: float = 0.62  # Normalized similarity threshold (0.0 to 1.0)
     WAKE_PHRASES: list = [
         "hey morphix",
         "hello morphix",
@@ -110,6 +118,6 @@ class Config:
     LOGGING_ENABLED: bool = True
     DEVELOPMENT_MODE: bool = False
     DEBUG_AUDIO_PIPELINE: bool = False
-    COMMAND_QUEUE_WARMUP_TIMEOUT: float = 1.0
+    COMMAND_QUEUE_WARMUP_TIMEOUT: float = 0.1
 
 

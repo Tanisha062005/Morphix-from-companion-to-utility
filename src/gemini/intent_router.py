@@ -73,28 +73,24 @@ class IntentRouter:
             return "Todo completed." if completed else "Todo not found."
 
         elif intent == "SHOW_TODO":
-            pending = self.todo_mgr.get_pending_todos()
-            if not pending:
-                return "Todo list is empty."
-            task_list_str = ", ".join(f"{i+1}. {t}" for i, t in enumerate(pending))
-            return f"You have {len(pending)} pending tasks: {task_list_str}."
+            from src.intent.todo_plugin import TodoService
+            return TodoService.get_instance().show_todo_list()
 
         elif intent == "CLEAR_TODO":
-            self.todo_mgr.clear_all_todos()
-            return "All tasks have been cleared from your todo list."
+            from src.intent.todo_plugin import TodoService
+            return TodoService.get_instance().clear_all()
 
         elif intent == "SET_REMINDER":
             msg = validated_intent.get("message", "")
             delay_seconds = int(validated_intent.get("delay_seconds", 0))
             self.reminder_mgr.add_reminder_by_delay(msg, delay_seconds)
+            from src.intent.reminder_plugin import ReminderService
+            ReminderService.get_instance().show_reminders()
             return "Reminder saved."
 
         elif intent == "SHOW_REMINDERS":
-            pending = self.reminder_mgr.get_pending_reminders()
-            if not pending:
-                return "Reminder list is empty."
-            rem_list_str = ", ".join(f"{r.get('text')}" for r in pending)
-            return f"You have {len(pending)} pending reminders: {rem_list_str}."
+            from src.intent.reminder_plugin import ReminderService
+            return ReminderService.get_instance().show_reminders()
 
         elif intent == "DELETE_REMINDER":
             target = validated_intent.get("target", "")

@@ -240,6 +240,7 @@ class FallbackWakeWordEngine(BaseWakeWordEngine):
         self._active: bool = False
         self._initialized: bool = False
         self._stt = None
+        self._last_err_time: float = 0.0
 
     def initialize(self) -> bool:
         try:
@@ -284,7 +285,11 @@ class FallbackWakeWordEngine(BaseWakeWordEngine):
             return False
 
         except Exception as e:
-            logger.error("Error in FallbackWakeWordEngine detection: %s", str(e))
+            import time
+            now = time.time()
+            if now - self._last_err_time >= 5.0:
+                self._last_err_time = now
+                logger.error("Error in FallbackWakeWordEngine detection: %s", str(e))
             return False
 
 

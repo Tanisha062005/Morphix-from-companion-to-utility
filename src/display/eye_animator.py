@@ -128,6 +128,7 @@ class EyeState(Enum):
     FESTIVAL_SANTA         = auto()
     FESTIVAL_TRICOLOR      = auto()
     FESTIVAL_KITE          = auto()
+    SENTRY_SCAN            = auto()
 
 # Category boundaries (inclusive start, exclusive end)
 CATEGORIES: list[tuple[str, int, int]] = [
@@ -332,6 +333,11 @@ FACE_STATES: dict[EyeState, FaceFrame] = {
         left  = _E(style="arc_happy", w=48, h=26, oy=-8),
         right = _E(style="arc_happy", w=48, h=26, oy=-8),
         mouth = _M(style="open_smile", w=36, h=14),
+    ),
+    EyeState.SENTRY_SCAN: FaceFrame(
+        left  = _E(style="pill",      w=46, h=18, colour=C_EYE, squint=0.60),
+        right = _E(style="pill",      w=46, h=18, colour=C_EYE, squint=0.60),
+        mouth = _M(style="flat",      w=24, h=4),
     ),
 
     # ── D. Interactive / Pet ─────────────────────────────────────────
@@ -1024,10 +1030,11 @@ def _ov_weather(surf, cx: int, by: int, t: float,
     try:
         font_hud = _get_font("consolas", 15, bold=True)
         if font_hud:
+            display_city = (city or "AUTO").upper().strip()
             display_cond = (desc or condition).title()
-            if len(display_cond) > 18:
-                display_cond = display_cond[:16] + ".."
-            hud_str = f"{city} | {temp_c}°C | {display_cond}"
+            if len(display_cond) > 16:
+                display_cond = display_cond[:14] + ".."
+            hud_str = f"{display_city}: {temp_c}°C | {display_cond}"
             hud_txt = font_hud.render(hud_str, True, (0, 229, 255))
             surf.blit(hud_txt, (bx + 58, by + 15))
     except Exception:
@@ -1385,6 +1392,591 @@ def _ov_festival(surf, cx: int, ey: int, my: int, ot: float,
         _ov_festival_hud(surf, cx, h - 20, title)
 
 
+def _ov_sentry_scan(surf, cx: int, ey: int, w: int, h: int, ot: float) -> None:
+    """Sleek horizontal cyber scanning beam and stealth guard mode HUD."""
+    import pygame
+    # Scanning laser bar oscillating horizontally across screen
+    scan_x = int(cx + math.sin(ot * 2.5) * (w * 0.35))
+    beam_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.line(beam_surf, (0, 229, 255, 120), (scan_x, ey - 25), (scan_x, ey + 25), 2)
+    pygame.draw.circle(beam_surf, (0, 229, 255, 200), (scan_x, ey), 4)
+    surf.blit(beam_surf, (0, 0))
+
+    # Bottom cyber HUD badge
+    try:
+        font = pygame.font.SysFont("consolas", 11, bold=True)
+    except Exception:
+        return
+
+    txt_surf = font.render("[ SENTRY GUARD ACTIVE ]", True, (0, 229, 255))
+    tw, th = txt_surf.get_width(), txt_surf.get_height()
+    bx = cx - (tw + 16) // 2
+    by = h - 22
+
+    pill = pygame.Rect(bx, by, tw + 16, th + 4)
+    pygame.draw.rect(surf, (5, 15, 25), pill, border_radius=5)
+    pygame.draw.rect(surf, (0, 200, 230), pill, width=1, border_radius=5)
+    surf.blit(txt_surf, (bx + 8, by + 2))
+
+
+def _ov_no_internet(surf, w: int, h: int, ot: float, timeout: float, elapsed: float) -> None:
+    """
+    Full-screen dark-mode offline / no-internet alert overlay.
+    Renders a minimalist No-Wi-Fi icon (slash over Wi-Fi signal arcs)
+    with bold 'OFFLINE / NO INTERNET' text and check connection hint.
+    """
+    import pygame
+
+    fade_in_dur = 0.20
+    fade_out_dur = 0.40
+    rem_time = max(0.0, timeout - elapsed)
+    if elapsed < fade_in_dur:
+        alpha_factor = elapsed / fade_in_dur
+    elif rem_time < fade_out_dur:
+        alpha_factor = rem_time / fade_out_dur
+    else:
+        alpha_factor = 1.0
+    alpha_factor = max(0.0, min(1.0, alpha_factor))
+    if alpha_factor <= 0.0:
+        return
+
+    # Deep dark-mode background with subtle red alert tint
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(bg, (22, 6, 8, int(245 * alpha_factor)), (0, 0, w, h))
+    surf.blit(bg, (0, 0))
+
+    cx = w // 2
+    icon_y = 70
+    alert_red = (255, 80, 80)
+    dim_red   = (160, 50, 50)
+    hint_txt  = (190, 140, 145)
+
+    # ── No Wi-Fi Icon (Concentric arcs + slash line) ──
+    pulse = 1.0 + 0.05 * math.sin(ot * 4.0)
+
+    # 1. Base dot
+    pygame.draw.circle(surf, alert_red, (cx, icon_y + 22), int(4 * pulse))
+
+    # 2. Concentric Wi-Fi arcs
+    arc_radii = [18, 30, 42]
+    for i, r in enumerate(arc_radii):
+        rect = pygame.Rect(cx - r, icon_y + 22 - r, r * 2, r * 2)
+        pygame.draw.arc(surf, (*alert_red, int(220 * alpha_factor)), rect, math.radians(45), math.radians(135), 3)
+
+    # 3. Diagonal strike-through slash (top-left to bottom-right across Wi-Fi symbol)
+    slash_start = (cx - 38, icon_y - 20)
+    slash_end   = (cx + 38, icon_y + 36)
+    pygame.draw.line(surf, (15, 5, 8), (slash_start[0] - 1, slash_start[1]), (slash_end[0] - 1, slash_end[1]), 5)
+    pygame.draw.line(surf, alert_red, slash_start, slash_end, 3)
+
+    # ── Text Labels ──
+    try:
+        font_main = _get_font("consolas", 15, bold=True)
+        font_sub  = _get_font("consolas", 12, bold=False)
+
+        if font_main:
+            txt_main = font_main.render("OFFLINE / NO INTERNET", True, alert_red)
+            txt_main.set_alpha(int(255 * alpha_factor))
+            surf.blit(txt_main, (cx - txt_main.get_width() // 2, icon_y + 52))
+
+        if font_sub:
+            txt_sub = font_sub.render("Check Wi-Fi or network connection", True, hint_txt)
+            txt_sub.set_alpha(int(210 * alpha_factor))
+            surf.blit(txt_sub, (cx - txt_sub.get_width() // 2, icon_y + 76))
+
+        # Bottom alert status badge
+        badge_w, badge_h = 160, 22
+        badge_rect = pygame.Rect(cx - badge_w // 2, h - 30, badge_w, badge_h)
+        badge_bg = pygame.Surface((badge_w, badge_h), pygame.SRCALPHA)
+        pygame.draw.rect(badge_bg, (50, 15, 20, int(180 * alpha_factor)), (0, 0, badge_w, badge_h), border_radius=5)
+        pygame.draw.rect(badge_bg, (*dim_red, int(200 * alpha_factor)), (0, 0, badge_w, badge_h), width=1, border_radius=5)
+        surf.blit(badge_bg, (cx - badge_w // 2, h - 30))
+
+        if font_sub:
+            b_txt = font_sub.render("! DISCONNECTED", True, alert_red)
+            b_txt.set_alpha(int(240 * alpha_factor))
+            surf.blit(b_txt, (cx - b_txt.get_width() // 2, h - 27))
+
+    except Exception:
+        pass
+
+
+def _ov_todo_card(surf, w: int, h: int, tasks: list, t: float, timeout: float, elapsed: float) -> None:
+    """
+    Full-screen dark-mode numbered task table.
+    Completely replaces the eye animation while active.
+    """
+    import pygame
+
+    # Fade alpha
+    fade_in_dur  = 0.20
+    fade_out_dur = 0.40
+    rem_time = max(0.0, timeout - elapsed)
+    if elapsed < fade_in_dur:
+        alpha_factor = elapsed / fade_in_dur
+    elif rem_time < fade_out_dur:
+        alpha_factor = rem_time / fade_out_dur
+    else:
+        alpha_factor = 1.0
+    alpha_factor = max(0.0, min(1.0, alpha_factor))
+    if alpha_factor <= 0.0:
+        return
+
+    # Full-screen background
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(bg, (8, 14, 26, int(245 * alpha_factor)), (0, 0, w, h))
+    surf.blit(bg, (0, 0))
+
+    margin_x = 18
+    cyan     = (0, 229, 255)
+    white    = (230, 248, 255)
+    dim      = (110, 160, 185)
+    accent   = (0, 180, 210)
+
+    # Horizontal rule colour (semi-transparent)
+    rule_a = int(120 * alpha_factor)
+
+    try:
+        font_hdr  = _get_font("consolas", 15, bold=True)
+        font_row  = _get_font("consolas", 13, bold=False)
+        font_num  = _get_font("consolas", 13, bold=True)
+        font_foot = _get_font("consolas", 11, bold=False)
+
+        # ── Header bar ──────────────────────────────────────────────────
+        if font_hdr:
+            # Tinted header strip
+            hdr_strip = pygame.Surface((w, 30), pygame.SRCALPHA)
+            pygame.draw.rect(hdr_strip, (0, 60, 90, int(180 * alpha_factor)),
+                             (0, 0, w, 30))
+            surf.blit(hdr_strip, (0, 0))
+
+            # Icon + title
+            hdr_txt = font_hdr.render("✔  MORPHIX TASKS", True, cyan)
+            hdr_txt.set_alpha(int(255 * alpha_factor))
+            surf.blit(hdr_txt, (margin_x, 7))
+
+            # Task count badge (right-aligned)
+            count_str = f"{len(tasks)} item{'s' if len(tasks) != 1 else ''}"
+            count_surf = font_hdr.render(count_str, True, (0, 180, 210))
+            count_surf.set_alpha(int(200 * alpha_factor))
+            surf.blit(count_surf, (w - count_surf.get_width() - margin_x, 7))
+
+        # Divider line below header
+        div_surf = pygame.Surface((w - 2 * margin_x, 1), pygame.SRCALPHA)
+        pygame.draw.line(div_surf, (*cyan, rule_a), (0, 0), (w - 2 * margin_x, 0))
+        surf.blit(div_surf, (margin_x, 32))
+
+        # ── Task rows ───────────────────────────────────────────────────
+        row_h   = 22
+        start_y = 40
+        max_rows = max(1, (h - start_y - 20) // row_h)
+
+        display_tasks = tasks if tasks else ["Your todo list is empty!"]
+
+        for i, task in enumerate(display_tasks[:max_rows]):
+            y = start_y + i * row_h
+
+            # Alternate row tint
+            if i % 2 == 0:
+                row_bg = pygame.Surface((w, row_h - 2), pygame.SRCALPHA)
+                pygame.draw.rect(row_bg, (0, 35, 55, int(60 * alpha_factor)),
+                                 (0, 0, w, row_h - 2))
+                surf.blit(row_bg, (0, y))
+
+            # Row number
+            if font_num and tasks:
+                num_str  = f"#{i + 1}"
+                num_surf = font_num.render(num_str, True, accent)
+                num_surf.set_alpha(int(255 * alpha_factor))
+                surf.blit(num_surf, (margin_x, y + 3))
+                task_x = margin_x + 34
+            else:
+                task_x = margin_x + 8
+
+            # Task text (truncate to fit)
+            if font_row:
+                max_chars = (w - task_x - margin_x) // 8  # ~8px per char at size 13
+                task_disp = task if len(task) <= max_chars else task[:max_chars - 2] + ".."
+                t_surf = font_row.render(task_disp, True, white if tasks else dim)
+                t_surf.set_alpha(int(255 * alpha_factor))
+                surf.blit(t_surf, (task_x, y + 3))
+
+        # More items indicator
+        if len(display_tasks) > max_rows and font_foot:
+            extra = len(display_tasks) - max_rows
+            more_surf = font_foot.render(f"  + {extra} more item{'s' if extra > 1 else ''} ...",
+                                         True, dim)
+            more_surf.set_alpha(int(180 * alpha_factor))
+            surf.blit(more_surf, (margin_x, h - 18))
+
+        # ── Bottom border ───────────────────────────────────────────────
+        pygame.draw.line(surf, (*cyan, rule_a),
+                         (margin_x, h - 6), (w - margin_x, h - 6), 1)
+
+    except Exception:
+        pass
+
+
+def _ov_reminder_card(surf, w: int, h: int, reminders: list, t: float, timeout: float, elapsed: float) -> None:
+    """
+    Full-screen reminder list overlay.
+    `reminders` is a list of dicts with 'text' and 'due' string keys.
+    Completely replaces the eye animation while active.
+    """
+    import pygame
+
+    fade_in_dur  = 0.20
+    fade_out_dur = 0.40
+    rem_time = max(0.0, timeout - elapsed)
+    if elapsed < fade_in_dur:
+        alpha_factor = elapsed / fade_in_dur
+    elif rem_time < fade_out_dur:
+        alpha_factor = rem_time / fade_out_dur
+    else:
+        alpha_factor = 1.0
+    alpha_factor = max(0.0, min(1.0, alpha_factor))
+    if alpha_factor <= 0.0:
+        return
+
+    # Full-screen background (warm amber tint for reminders)
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(bg, (18, 10, 4, int(245 * alpha_factor)), (0, 0, w, h))
+    surf.blit(bg, (0, 0))
+
+    margin_x = 18
+    amber    = (255, 175, 40)
+    white    = (255, 245, 220)
+    dim      = (160, 130, 80)
+    gold     = (255, 210, 80)
+    rule_a   = int(120 * alpha_factor)
+
+    try:
+        font_hdr  = _get_font("consolas", 15, bold=True)
+        font_row  = _get_font("consolas", 13, bold=False)
+        font_time = _get_font("consolas", 11, bold=False)
+        font_foot = _get_font("consolas", 11, bold=False)
+
+        # ── Header bar ──────────────────────────────────────────────────
+        if font_hdr:
+            hdr_strip = pygame.Surface((w, 30), pygame.SRCALPHA)
+            pygame.draw.rect(hdr_strip, (55, 30, 0, int(180 * alpha_factor)),
+                             (0, 0, w, 30))
+            surf.blit(hdr_strip, (0, 0))
+
+            hdr_txt = font_hdr.render("⏰  REMINDERS", True, amber)
+            hdr_txt.set_alpha(int(255 * alpha_factor))
+            surf.blit(hdr_txt, (margin_x, 7))
+
+            count_str = f"{len(reminders)} active" if reminders else "none"
+            count_surf = font_hdr.render(count_str, True, gold)
+            count_surf.set_alpha(int(200 * alpha_factor))
+            surf.blit(count_surf, (w - count_surf.get_width() - margin_x, 7))
+
+        # Divider
+        div_surf = pygame.Surface((w - 2 * margin_x, 1), pygame.SRCALPHA)
+        pygame.draw.line(div_surf, (*amber, rule_a), (0, 0), (w - 2 * margin_x, 0))
+        surf.blit(div_surf, (margin_x, 32))
+
+        # ── Reminder rows ────────────────────────────────────────────────
+        row_h   = 28
+        start_y = 40
+        max_rows = max(1, (h - start_y - 20) // row_h)
+
+        display_rems = reminders if reminders else [{"text": "No pending reminders", "due": ""}]
+
+        for i, rem in enumerate(display_rems[:max_rows]):
+            y = start_y + i * row_h
+
+            if i % 2 == 0:
+                row_bg = pygame.Surface((w, row_h - 2), pygame.SRCALPHA)
+                pygame.draw.rect(row_bg, (40, 20, 0, int(55 * alpha_factor)),
+                                 (0, 0, w, row_h - 2))
+                surf.blit(row_bg, (0, y))
+
+            rem_text = str(rem.get("text", rem.get("title", "Reminder")))
+            due_str  = str(rem.get("due", rem.get("due_time", "")))
+
+            # Task text
+            if font_row:
+                max_chars = (w - margin_x * 2 - 10) // 8
+                disp = rem_text if len(rem_text) <= max_chars else rem_text[:max_chars - 2] + ".."
+                t_surf = font_row.render(disp, True, white)
+                t_surf.set_alpha(int(255 * alpha_factor))
+                surf.blit(t_surf, (margin_x + 4, y + 2))
+
+            # Due time on second line
+            if due_str and font_time:
+                due_disp = f"  Due: {due_str}"
+                d_surf = font_time.render(due_disp, True, gold)
+                d_surf.set_alpha(int(200 * alpha_factor))
+                surf.blit(d_surf, (margin_x + 4, y + 16))
+
+        if len(display_rems) > max_rows and font_foot:
+            extra = len(display_rems) - max_rows
+            more = font_foot.render(f"  + {extra} more ...", True, dim)
+            more.set_alpha(int(180 * alpha_factor))
+            surf.blit(more, (margin_x, h - 18))
+
+        pygame.draw.line(surf, (*amber, rule_a),
+                         (margin_x, h - 6), (w - margin_x, h - 6), 1)
+
+    except Exception:
+        pass
+
+
+def _ov_rps_countdown(surf, w: int, h: int, data: Any, t: float, timeout: float, elapsed: float) -> None:
+    """
+    Full-screen arcade countdown card for Rock Paper Scissors (3... 2... 1... SHOW!).
+    """
+    import pygame
+
+    fade_in_dur = 0.15
+    fade_out_dur = 0.30
+    rem_time = max(0.0, timeout - elapsed)
+    if elapsed < fade_in_dur:
+        alpha_factor = elapsed / fade_in_dur
+    elif rem_time < fade_out_dur:
+        alpha_factor = rem_time / fade_out_dur
+    else:
+        alpha_factor = 1.0
+    alpha_factor = max(0.0, min(1.0, alpha_factor))
+    if alpha_factor <= 0.0:
+        return
+
+    # Arcade dark indigo background
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(bg, (10, 12, 28, int(245 * alpha_factor)), (0, 0, w, h))
+    surf.blit(bg, (0, 0))
+
+    margin_x = 18
+    cyan = (0, 229, 255)
+    purple = (180, 100, 255)
+    gold = (255, 215, 0)
+    white = (240, 245, 255)
+    rule_a = int(120 * alpha_factor)
+
+    try:
+        font_hdr = _get_font("consolas", 15, bold=True)
+        font_count = _get_font("consolas", 52, bold=True)
+        font_sub = _get_font("consolas", 13, bold=False)
+
+        # Header bar
+        if font_hdr:
+            hdr_strip = pygame.Surface((w, 30), pygame.SRCALPHA)
+            pygame.draw.rect(hdr_strip, (30, 20, 60, int(180 * alpha_factor)), (0, 0, w, 30))
+            surf.blit(hdr_strip, (0, 0))
+
+            hdr_txt = font_hdr.render("✊ ✋ ✌  ROCK PAPER SCISSORS", True, cyan)
+            hdr_txt.set_alpha(int(255 * alpha_factor))
+            surf.blit(hdr_txt, (margin_x, 7))
+
+        div_surf = pygame.Surface((w - 2 * margin_x, 1), pygame.SRCALPHA)
+        pygame.draw.line(div_surf, (*purple, rule_a), (0, 0), (w - 2 * margin_x, 0))
+        surf.blit(div_surf, (margin_x, 32))
+
+        # Extract count text
+        count_text = "3"
+        if isinstance(data, dict):
+            count_text = str(data.get("count", data.get("text", "3")))
+        elif data is not None:
+            count_text = str(data)
+
+        # Central countdown box with pulse effect
+        pulse = 1.0 + 0.06 * math.sin(t * 8.0)
+        cx, cy = w // 2, h // 2 + 6
+
+        # Glowing badge around countdown
+        box_w, box_h = int(180 * pulse), 64
+        badge_bg = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        pygame.draw.rect(badge_bg, (40, 25, 80, int(160 * alpha_factor)), (0, 0, box_w, box_h), border_radius=12)
+        pygame.draw.rect(badge_bg, (*cyan, int(220 * alpha_factor)), (0, 0, box_w, box_h), width=2, border_radius=12)
+        surf.blit(badge_bg, (cx - box_w // 2, cy - box_h // 2))
+
+        if font_count:
+            c_color = gold if count_text.upper() in ("SHOW!", "SHOW") else cyan
+            cnt_surf = font_count.render(count_text.upper(), True, c_color)
+            cnt_surf.set_alpha(int(255 * alpha_factor))
+            surf.blit(cnt_surf, (cx - cnt_surf.get_width() // 2, cy - cnt_surf.get_height() // 2))
+
+        if font_sub:
+            sub_txt = font_sub.render("Show your hand to the camera on count of 3...", True, white)
+            sub_txt.set_alpha(int(200 * alpha_factor))
+            surf.blit(sub_txt, (cx - sub_txt.get_width() // 2, h - 34))
+
+        pygame.draw.line(surf, (*purple, rule_a), (margin_x, h - 10), (w - margin_x, h - 10), 1)
+
+    except Exception:
+        pass
+
+
+def _ov_rps_result(surf, w: int, h: int, data: Any, t: float, timeout: float, elapsed: float) -> None:
+    """
+    Full-screen 3-column VS Arena card for Rock Paper Scissors result.
+    Left: Player | Center: VS | Right: Morphix + Winner Banner.
+    """
+    import pygame
+
+    fade_in_dur = 0.20
+    fade_out_dur = 0.40
+    rem_time = max(0.0, timeout - elapsed)
+    if elapsed < fade_in_dur:
+        alpha_factor = elapsed / fade_in_dur
+    elif rem_time < fade_out_dur:
+        alpha_factor = rem_time / fade_out_dur
+    else:
+        alpha_factor = 1.0
+    alpha_factor = max(0.0, min(1.0, alpha_factor))
+    if alpha_factor <= 0.0:
+        return
+
+    # Dark cyber battle arena background
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(bg, (8, 10, 24, int(245 * alpha_factor)), (0, 0, w, h))
+    surf.blit(bg, (0, 0))
+
+    margin_x = 16
+    cyan = (0, 229, 255)
+    green = (76, 217, 100)
+    red = (255, 69, 58)
+    gold = (255, 215, 0)
+    white = (245, 245, 255)
+    rule_a = int(120 * alpha_factor)
+
+    # Parse data
+    res_dict = data if isinstance(data, dict) else {}
+    player_move = str(res_dict.get("player", "ROCK")).upper()
+    bot_move = str(res_dict.get("morphix", res_dict.get("bot", "SCISSORS"))).upper()
+    winner = str(res_dict.get("winner", "TIE")).upper()  # PLAYER, MORPHIX, TIE, UNKNOWN
+
+    # Gestures symbols
+    symbols = {
+        "ROCK": "ROCK [R]",
+        "PAPER": "PAPER [P]",
+        "SCISSORS": "SCISSORS [S]",
+        "UNKNOWN": "? UNKNOWN"
+    }
+
+    p_str = symbols.get(player_move, player_move)
+    b_str = symbols.get(bot_move, bot_move)
+
+    if winner in ("PLAYER", "YOU", "USER"):
+        banner_text = "YOU WIN!"
+        banner_color = green
+        banner_bg_c = (20, 60, 30)
+    elif winner in ("MORPHIX", "BOT", "I WIN"):
+        banner_text = "MORPHIX WINS!"
+        banner_color = red
+        banner_bg_c = (60, 20, 25)
+    elif winner in ("TIE", "DRAW"):
+        banner_text = "IT'S A TIE!"
+        banner_color = gold
+        banner_bg_c = (55, 45, 15)
+    else:
+        banner_text = "NO HAND DETECTED"
+        banner_color = (255, 165, 0)
+        banner_bg_c = (50, 35, 15)
+
+    try:
+        font_vs = _get_font("consolas", 22, bold=True)
+        font_banner = _get_font("consolas", 16, bold=True)
+        font_move = _get_font("consolas", 14, bold=True)
+        font_label = _get_font("consolas", 12, bold=True)
+
+        # ── Top Winner Banner ──────────────────────────────────────────
+        hdr_h = 32
+        hdr_strip = pygame.Surface((w, hdr_h), pygame.SRCALPHA)
+        pygame.draw.rect(hdr_strip, (*banner_bg_c, int(200 * alpha_factor)), (0, 0, w, hdr_h))
+        surf.blit(hdr_strip, (0, 0))
+
+        if font_banner:
+            b_surf = font_banner.render(banner_text, True, banner_color)
+            b_surf.set_alpha(int(255 * alpha_factor))
+            surf.blit(b_surf, (w // 2 - b_surf.get_width() // 2, 7))
+
+        div_surf = pygame.Surface((w - 2 * margin_x, 1), pygame.SRCALPHA)
+        pygame.draw.line(div_surf, (*banner_color, rule_a), (0, 0), (w - 2 * margin_x, 0))
+        surf.blit(div_surf, (margin_x, hdr_h + 2))
+
+        # ── 3-Column Arena Cards (Left: You | Center: VS | Right: Morphix) ──
+        card_y = 44
+        card_h = 175
+        card_w = 170
+
+        # Left Column: Player
+        p_card_x = margin_x + 4
+        p_card_bg = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+        pygame.draw.rect(p_card_bg, (15, 25, 45, int(170 * alpha_factor)), (0, 0, card_w, card_h), border_radius=10)
+        p_border = green if winner in ("PLAYER", "YOU", "USER") else (50, 80, 120)
+        pygame.draw.rect(p_card_bg, (*p_border, int(200 * alpha_factor)), (0, 0, card_w, card_h), width=2, border_radius=10)
+        surf.blit(p_card_bg, (p_card_x, card_y))
+
+        if font_label:
+            pl_lbl = font_label.render("YOU (PLAYER)", True, cyan)
+            pl_lbl.set_alpha(int(240 * alpha_factor))
+            surf.blit(pl_lbl, (p_card_x + card_w // 2 - pl_lbl.get_width() // 2, card_y + 14))
+
+        if font_move:
+            pm_surf = font_move.render(p_str, True, white)
+            pm_surf.set_alpha(int(255 * alpha_factor))
+            surf.blit(pm_surf, (p_card_x + card_w // 2 - pm_surf.get_width() // 2, card_y + 80))
+
+        # Center: VS Badge
+        cx = w // 2
+        cy = card_y + card_h // 2
+        vs_radius = 26
+        vs_bg = pygame.Surface((vs_radius * 2, vs_radius * 2), pygame.SRCALPHA)
+        pygame.draw.circle(vs_bg, (30, 20, 50, int(220 * alpha_factor)), (vs_radius, vs_radius), vs_radius)
+        pygame.draw.circle(vs_bg, (*gold, int(220 * alpha_factor)), (vs_radius, vs_radius), vs_radius, width=2)
+        surf.blit(vs_bg, (cx - vs_radius, cy - vs_radius))
+
+        if font_vs:
+            vs_txt = font_vs.render("VS", True, gold)
+            vs_txt.set_alpha(int(255 * alpha_factor))
+            surf.blit(vs_txt, (cx - vs_txt.get_width() // 2, cy - vs_txt.get_height() // 2))
+
+        # Right Column: Morphix
+        b_card_x = w - margin_x - card_w - 4
+        b_card_bg = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+        pygame.draw.rect(b_card_bg, (25, 15, 35, int(170 * alpha_factor)), (0, 0, card_w, card_h), border_radius=10)
+        b_border = red if winner in ("MORPHIX", "BOT", "I WIN") else (90, 50, 110)
+        pygame.draw.rect(b_card_bg, (*b_border, int(200 * alpha_factor)), (0, 0, card_w, card_h), width=2, border_radius=10)
+        surf.blit(b_card_bg, (b_card_x, card_y))
+
+        if font_label:
+            bl_lbl = font_label.render("MORPHIX", True, (255, 140, 200))
+            bl_lbl.set_alpha(int(240 * alpha_factor))
+            surf.blit(bl_lbl, (b_card_x + card_w // 2 - bl_lbl.get_width() // 2, card_y + 14))
+
+        if font_move:
+            bm_surf = font_move.render(b_str, True, white)
+            bm_surf.set_alpha(int(255 * alpha_factor))
+            surf.blit(bm_surf, (b_card_x + card_w // 2 - bm_surf.get_width() // 2, card_y + 80))
+
+        # Bottom Rule
+        pygame.draw.line(surf, (*banner_color, rule_a), (margin_x, h - 8), (w - margin_x, h - 8), 1)
+
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Global Display Manager Instance Registry
+# ---------------------------------------------------------------------------
+_GLOBAL_DISPLAY_INSTANCE: Optional["EyeAnimatorThread"] = None
+
+def get_active_display() -> Optional["EyeAnimatorThread"]:
+    """Returns the globally active EyeAnimatorThread instance if running."""
+    global _GLOBAL_DISPLAY_INSTANCE
+    if _GLOBAL_DISPLAY_INSTANCE and _GLOBAL_DISPLAY_INSTANCE.is_alive():
+        return _GLOBAL_DISPLAY_INSTANCE
+    return None
+
+def set_active_display(animator_thread: Optional["EyeAnimatorThread"]) -> None:
+    """Sets the globally active EyeAnimatorThread instance."""
+    global _GLOBAL_DISPLAY_INSTANCE
+    _GLOBAL_DISPLAY_INSTANCE = animator_thread
+
+
 # ---------------------------------------------------------------------------
 # EyeAnimator  — core renderer
 # ---------------------------------------------------------------------------
@@ -1471,6 +2063,15 @@ class EyeAnimator:
         self._festival_theme    = "NONE"
         self._festival_title    = ""
 
+        # Unified Display Overlay state
+        self._active_overlay: Optional[str] = None  # "TODO_VIEW" | "REMINDER_VIEW" | "FESTIVAL_GANESH" | ...
+        self._overlay_data: Any = None
+        self._card_overlay_type: Optional[str] = None  # Compatibility alias
+        self._card_todo_tasks: List[str] = []
+        self._card_reminder_list: List[dict] = []   # [{"text": ..., "due": ...}, ...]
+        self._card_timeout: float = 8.0
+        self._card_elapsed: float = 0.0
+
         # Pre-cached fonts to avoid per-frame SysFont allocations (Pi 4B optimization)
         self.font_zzz       = _get_font("consolas", 19, bold=True)
         self.font_hud       = _get_font("consolas", 15, bold=True)
@@ -1479,6 +2080,117 @@ class EyeAnimator:
         self.font_telemetry = _get_font("consolas", 13, bold=True)
 
         self._lock = threading.Lock()
+
+    @property
+    def active_overlay(self) -> Optional[str]:
+        with self._lock:
+            return self._active_overlay
+
+    @active_overlay.setter
+    def active_overlay(self, val: Optional[str]) -> None:
+        with self._lock:
+            self._active_overlay = val
+            if val in ("TODO_VIEW", "TODO"):
+                self._card_overlay_type = "TODO"
+            elif val in ("REMINDER_VIEW", "REMINDER"):
+                self._card_overlay_type = "REMINDER"
+            else:
+                self._card_overlay_type = None
+
+    @property
+    def overlay_data(self) -> Any:
+        with self._lock:
+            return self._overlay_data
+
+    def set_overlay(self, overlay_name: Optional[str], tasks: Optional[list] = None, data: Any = None, timeout: float = 8.0, **kwargs) -> None:
+        """
+        Unified overlay manager: activates visual overlays ('TODO_VIEW', 'FESTIVAL_GANESH', etc.).
+        """
+        with self._lock:
+            if not overlay_name or overlay_name == "NONE":
+                self._active_overlay = None
+                self._card_overlay_type = None
+                self._overlay_data = None
+                self._card_elapsed = 0.0
+                return
+
+            ov_upper = str(overlay_name).upper()
+            if ov_upper in ("TODO_VIEW", "TODO"):
+                self._active_overlay = "TODO_VIEW"
+                self._card_overlay_type = "TODO"
+                raw_tasks = tasks if tasks is not None else (data if data is not None else kwargs.get("tasks", []))
+                self._card_todo_tasks = [str(t) for t in raw_tasks if str(t).strip()]
+                self._overlay_data = self._card_todo_tasks
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("REMINDER_VIEW", "REMINDER", "REMINDERS"):
+                self._active_overlay = "REMINDER_VIEW"
+                self._card_overlay_type = "REMINDER"
+                raw_rem = data if data is not None else (tasks if tasks is not None else kwargs.get("reminders", []))
+                self._card_reminder_list = list(raw_rem) if raw_rem else []
+                self._overlay_data = self._card_reminder_list
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("FESTIVAL_GANESH", "FESTIVAL_MODAK", "GANESH"):
+                self._active_overlay = "FESTIVAL_GANESH"
+                self._card_overlay_type = None
+                self._festival_theme = "MODAK"
+                self._festival_title = "Ganpati Bappa Morya! 🥟"
+                self._state = EyeState.HAPPY
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("FESTIVAL_HOLI", "HOLI"):
+                self._active_overlay = "FESTIVAL_HOLI"
+                self._card_overlay_type = None
+                self._festival_theme = "HOLI"
+                self._festival_title = "Happy Holi! 🎨"
+                self._state = EyeState.EXCITED
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("FESTIVAL_INDEPENDENCE", "FESTIVAL_TRICOLOR", "INDEPENDENCE"):
+                self._active_overlay = "FESTIVAL_INDEPENDENCE"
+                self._card_overlay_type = None
+                self._festival_theme = "TRICOLOR"
+                self._festival_title = "Happy Independence Day! 🇮🇳"
+                self._state = EyeState.HAPPY
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("FESTIVAL_DIWALI", "DIWALI"):
+                self._active_overlay = "FESTIVAL_DIWALI"
+                self._card_overlay_type = None
+                self._festival_theme = "DIWALI"
+                self._festival_title = "Happy Diwali! 🪔"
+                self._state = EyeState.HAPPY
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("NO_INTERNET", "OFFLINE", "NO_WIFI"):
+                self._active_overlay = "NO_INTERNET"
+                self._card_overlay_type = None
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("RPS_COUNTDOWN", "RPS_COUNT"):
+                self._active_overlay = "RPS_COUNTDOWN"
+                self._card_overlay_type = None
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 2.0))
+                self._card_elapsed = 0.0
+            elif ov_upper in ("RPS_RESULT", "RPS_WIN", "RPS_GAME"):
+                self._active_overlay = "RPS_RESULT"
+                self._card_overlay_type = None
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
+            else:
+                self._active_overlay = ov_upper
+                self._card_overlay_type = None
+                self._overlay_data = data
+                self._card_timeout = float(max(timeout, 4.0))
+                self._card_elapsed = 0.0
 
     def set_festival_theme(self, theme: Any = "NONE", title: str = "") -> None:
         """Sets the active seasonal or Indian festival theme."""
@@ -1514,6 +2226,147 @@ class EyeAnimator:
             self._telemetry_battery  = battery
             self._telemetry_charging = is_charging
             self._telemetry_alert    = is_alert
+
+    def show_todo_overlay(self, tasks: list, timeout: float = 8.0) -> None:
+        """Triggers full-screen task table overlay (replaces eye animation).
+        `timeout` should be >= TTS duration + 3s buffer. Defaults to 8 s."""
+        self.set_overlay("TODO_VIEW", tasks=tasks, timeout=timeout)
+
+    def show_reminders_overlay(self, reminders: list, timeout: float = 8.0) -> None:
+        """Triggers full-screen reminder list overlay.
+        `reminders` should be a list of dicts with 'text' and 'due' keys."""
+        self.set_overlay("REMINDER_VIEW", data=reminders, timeout=timeout)
+
+    def show_reminder_overlay(self, title: str, due_time: str, timeout: float = 8.0) -> None:
+        """Legacy single-reminder overlay — wraps into list form for the new renderer."""
+        self.show_reminders_overlay(
+            [{"text": title, "due": due_time}],
+            timeout=timeout
+        )
+
+    def extend_overlay(self, extra_seconds: float) -> None:
+        """Extends current card overlay timeout without resetting the elapsed timer.
+        Safe to call from the TTS thread immediately before speak() begins."""
+        with self._lock:
+            if self._active_overlay is not None or self._card_overlay_type is not None:
+                self._card_timeout = self._card_elapsed + float(extra_seconds)
+
+    def clear_overlay(self) -> None:
+        """Immediately clears the active card overlay and returns to eye animation."""
+        with self._lock:
+            self._active_overlay = None
+            self._card_overlay_type = None
+            self._overlay_data = None
+            self._card_elapsed = 0.0
+
+    def show_rps_countdown(self, count_text: str = "3", timeout: float = 3.0) -> None:
+        """Triggers RPS countdown overlay on display."""
+        self.set_overlay("RPS_COUNTDOWN", data={"count": count_text}, timeout=timeout)
+
+    def show_rps_result(self, player: str, morphix: str, winner: str, timeout: float = 8.0) -> None:
+        """Triggers RPS VS Arena result overlay on display."""
+        self.set_overlay("RPS_RESULT", data={"player": player, "morphix": morphix, "winner": winner}, timeout=timeout)
+
+    def draw_todo_overlay(self, surface, data: Any = None) -> None:
+        """Draws dark-mode to-do card table on 480x240 surface."""
+        tasks = data if data is not None else self._card_todo_tasks
+        _ov_todo_card(surface, self.width, self.height, tasks,
+                      self._overlay_t, self._card_timeout, self._card_elapsed)
+
+    def draw_reminder_overlay(self, surface, data: Any = None) -> None:
+        """Draws dark-mode reminder card list on 480x240 surface."""
+        rems = data if data is not None else self._card_reminder_list
+        _ov_reminder_card(surface, self.width, self.height, rems,
+                          self._overlay_t, self._card_timeout, self._card_elapsed)
+
+    def draw_no_internet_overlay(self, surface, data: Any = None) -> None:
+        """Draws dark-mode No Wi-Fi offline alert on 480x240 surface."""
+        _ov_no_internet(surface, self.width, self.height, self._overlay_t,
+                        self._card_timeout, self._card_elapsed)
+
+    def draw_rps_countdown_overlay(self, surface, data: Any = None) -> None:
+        """Draws dark-mode RPS countdown on 480x240 surface."""
+        _ov_rps_countdown(surface, self.width, self.height, data or self._overlay_data,
+                          self._overlay_t, self._card_timeout, self._card_elapsed)
+
+    def draw_rps_result_overlay(self, surface, data: Any = None) -> None:
+        """Draws dark-mode RPS result on 480x240 surface."""
+        _ov_rps_result(surface, self.width, self.height, data or self._overlay_data,
+                       self._overlay_t, self._card_timeout, self._card_elapsed)
+
+    def draw_ganesh_festival_overlay(self, surface) -> None:
+        """Renders Ganesh Chaturthi custom graphics (Tilak + Modak) on procedural eyes."""
+        self.draw_procedural_eyes(surface)
+        ax_l = int(self.width * self.EYE_L_X)
+        ax_r = int(self.width * self.EYE_R_X)
+        ay   = int(self.height * self.EYE_Y)
+        my   = int(self.height * self.MOUTH_Y)
+        cx   = self.width // 2
+        _ov_festival(surface, cx, ay, my, self._overlay_t, "MODAK", "Ganpati Bappa Morya! 🥟", self.width, self.height, ax_l, ax_r)
+
+    def draw_holi_festival_overlay(self, surface) -> None:
+        """Renders Holi festival splash overlay on procedural eyes."""
+        self.draw_procedural_eyes(surface)
+        ax_l = int(self.width * self.EYE_L_X)
+        ax_r = int(self.width * self.EYE_R_X)
+        ay   = int(self.height * self.EYE_Y)
+        my   = int(self.height * self.MOUTH_Y)
+        cx   = self.width // 2
+        _ov_festival(surface, cx, ay, my, self._overlay_t, "HOLI", "Happy Holi! 🎨", self.width, self.height, ax_l, ax_r)
+
+    def draw_independence_festival_overlay(self, surface) -> None:
+        """Renders Independence Day Tricolor badge overlay on procedural eyes."""
+        self.draw_procedural_eyes(surface)
+        ax_l = int(self.width * self.EYE_L_X)
+        ax_r = int(self.width * self.EYE_R_X)
+        ay   = int(self.height * self.EYE_Y)
+        my   = int(self.height * self.MOUTH_Y)
+        cx   = self.width // 2
+        _ov_festival(surface, cx, ay, my, self._overlay_t, "TRICOLOR", "Happy Independence Day! 🇮🇳", self.width, self.height, ax_l, ax_r)
+
+    def draw_procedural_eyes(self, surface) -> None:
+        """Renders procedural eyes, mouth, particles, and state-specific overlays."""
+        # Blink ratio
+        if self._blink_phase == 1:
+            br = self._blink_t
+        elif self._blink_phase == 2:
+            br = 1.0 - self._blink_t
+        else:
+            br = 0.0
+
+        ax_l = int(self.width  * self.EYE_L_X)
+        ax_r = int(self.width  * self.EYE_R_X)
+        ay   = int(self.height * self.EYE_Y)
+        my   = int(self.height * self.MOUTH_Y)
+        cx   = self.width // 2
+
+        speak_ratio = (0.5 + 0.5 * math.sin(self._speak_phase)) * self._speak_amp
+
+        # Sick shiver (±5px oscillation)
+        cur_l = self._cur_l
+        cur_r = self._cur_r
+        if self._state == EyeState.SICK_COLD:
+            shiv = 5 * math.sin(self._sick_t * 18)
+            cur_l = dataclasses.replace(self._cur_l, ox=self._cur_l.ox + shiv)
+            cur_r = dataclasses.replace(self._cur_r, ox=self._cur_r.ox + shiv)
+
+        # Draw eyes
+        self._render_eye(surface, ax_l, ay, cur_l, br, self._dizzy_angle, True)
+        self._render_eye(surface, ax_r, ay, cur_r, br, self._dizzy_angle, False)
+
+        # Draw mouth
+        self._render_mouth(surface, cx, my, self._cur_m, speak_ratio)
+
+        # Draw particles
+        for p in self._particles:
+            _draw_particle(surface, p)
+
+        # State-specific overlays
+        self._draw_overlay(surface, ax_l, ax_r, ay, my, cx)
+
+        # ZZZ
+        if self._state == EyeState.DEEP_SLEEP:
+            self._draw_zzz(surface, ax_r + 56, ay - 26)
 
     def set_state(self, state: EyeState) -> None:
         with self._lock:
@@ -1666,6 +2519,13 @@ class EyeAnimator:
 
             # State timers
             self._overlay_t += dt
+            if self._active_overlay is not None or self._card_overlay_type is not None:
+                self._card_elapsed += dt
+                if self._card_elapsed >= self._card_timeout:
+                    self._active_overlay = None
+                    self._card_overlay_type = None
+                    self._overlay_data = None
+                    self._card_elapsed = 0.0
             if self._state == EyeState.DEEP_SLEEP:
                 self._zzz_t += dt
             if self._state == EyeState.DIZZY or self._state == EyeState.INTERACTION_BANG_SHOOT:
@@ -1721,49 +2581,27 @@ class EyeAnimator:
         surface.fill(C_BG)
 
         with self._lock:
-            # Blink ratio
-            if self._blink_phase == 1:
-                br = self._blink_t
-            elif self._blink_phase == 2:
-                br = 1.0 - self._blink_t
+            # ── Full-screen card overlay or custom overlay takes priority ──
+            if self._active_overlay in ("TODO_VIEW", "TODO") or self._card_overlay_type == "TODO":
+                self.draw_todo_overlay(surface, self._overlay_data or self._card_todo_tasks)
+            elif self._active_overlay in ("REMINDER_VIEW", "REMINDER") or self._card_overlay_type == "REMINDER":
+                self.draw_reminder_overlay(surface, self._overlay_data or self._card_reminder_list)
+            elif self._active_overlay in ("NO_INTERNET", "OFFLINE", "NO_WIFI"):
+                self.draw_no_internet_overlay(surface, self._overlay_data)
+            elif self._active_overlay in ("RPS_COUNTDOWN", "RPS_COUNT"):
+                self.draw_rps_countdown_overlay(surface, self._overlay_data)
+            elif self._active_overlay in ("RPS_RESULT", "RPS_WIN", "RPS_GAME"):
+                self.draw_rps_result_overlay(surface, self._overlay_data)
+            elif self._active_overlay == "FESTIVAL_GANESH":
+                self.draw_ganesh_festival_overlay(surface)
+            elif self._active_overlay == "FESTIVAL_HOLI":
+                self.draw_holi_festival_overlay(surface)
+            elif self._active_overlay in ("FESTIVAL_INDEPENDENCE", "FESTIVAL_TRICOLOR"):
+                self.draw_independence_festival_overlay(surface)
             else:
-                br = 0.0
+                self.draw_procedural_eyes(surface)
 
-            ax_l = int(self.width  * self.EYE_L_X)
-            ax_r = int(self.width  * self.EYE_R_X)
-            ay   = int(self.height * self.EYE_Y)
-            my   = int(self.height * self.MOUTH_Y)
-            cx   = self.width // 2
-
-            speak_ratio = (0.5 + 0.5 * math.sin(self._speak_phase)) * self._speak_amp
-
-            # Sick shiver (±5px oscillation)
-            cur_l = self._cur_l
-            cur_r = self._cur_r
-            if self._state == EyeState.SICK_COLD:
-                shiv = 5 * math.sin(self._sick_t * 18)
-                cur_l = dataclasses.replace(self._cur_l, ox=self._cur_l.ox + shiv)
-                cur_r = dataclasses.replace(self._cur_r, ox=self._cur_r.ox + shiv)
-
-            # Draw eyes
-            self._render_eye(surface, ax_l, ay, cur_l, br, self._dizzy_angle, True)
-            self._render_eye(surface, ax_r, ay, cur_r, br, self._dizzy_angle, False)
-
-            # Draw mouth
-            self._render_mouth(surface, cx, my, self._cur_m, speak_ratio)
-
-            # Draw particles
-            for p in self._particles:
-                _draw_particle(surface, p)
-
-            # State-specific overlays
-            self._draw_overlay(surface, ax_l, ax_r, ay, my, cx)
-
-            # ZZZ
-            if self._state == EyeState.DEEP_SLEEP:
-                self._draw_zzz(surface, ax_r + 56, ay - 26)
-
-        # Scanlines
+        # Scanlines (applied to full surface including card overlay)
         scan = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
         for y in range(0, self.height, 4):
             pygame.draw.line(scan, (0, 0, 0, 14), (0, y), (self.width, y))
@@ -1847,6 +2685,8 @@ class EyeAnimator:
             _ov_festival(surf, cx, ey, my, ot, "TRICOLOR", "Jai Hind! 🇮🇳", w, h, lx, rx)
         elif self._state == EyeState.FESTIVAL_KITE:
             _ov_festival(surf, cx, ey, my, ot, "KITE", "Happy Makar Sankranti! 🪁", w, h, lx, rx)
+        elif self._state == EyeState.SENTRY_SCAN:
+            _ov_sentry_scan(surf, cx, ey, w, h, ot)
 
         # Draw dynamic seasonal / festival overlay if active
         if self._festival_theme and self._festival_theme != "NONE":
@@ -1893,6 +2733,62 @@ class EyeAnimatorThread:
         self._stop_evt  = threading.Event()
         self._ready_evt = threading.Event()
 
+    @property
+    def active_overlay(self) -> Optional[str]:
+        return self._animator.active_overlay if self._animator else None
+
+    @property
+    def overlay_data(self) -> Any:
+        return self._animator.overlay_data if self._animator else None
+
+    def set_overlay(self, overlay_name: Optional[str], tasks: Optional[list] = None, data: Any = None, timeout: float = 8.0, **kwargs) -> None:
+        if self._animator:
+            self._animator.set_overlay(overlay_name, tasks=tasks, data=data, timeout=timeout, **kwargs)
+
+    def draw_todo_overlay(self, surface, data: Any = None) -> None:
+        if self._animator:
+            self._animator.draw_todo_overlay(surface, data)
+
+    def draw_reminder_overlay(self, surface, data: Any = None) -> None:
+        if self._animator:
+            self._animator.draw_reminder_overlay(surface, data)
+
+    def draw_no_internet_overlay(self, surface, data: Any = None) -> None:
+        if self._animator:
+            self._animator.draw_no_internet_overlay(surface, data)
+
+    def draw_rps_countdown_overlay(self, surface, data: Any = None) -> None:
+        if self._animator:
+            self._animator.draw_rps_countdown_overlay(surface, data)
+
+    def draw_rps_result_overlay(self, surface, data: Any = None) -> None:
+        if self._animator:
+            self._animator.draw_rps_result_overlay(surface, data)
+
+    def show_rps_countdown(self, count_text: str = "3", timeout: float = 3.0) -> None:
+        if self._animator:
+            self._animator.show_rps_countdown(count_text, timeout)
+
+    def show_rps_result(self, player: str, morphix: str, winner: str, timeout: float = 8.0) -> None:
+        if self._animator:
+            self._animator.show_rps_result(player, morphix, winner, timeout)
+
+    def draw_ganesh_festival_overlay(self, surface) -> None:
+        if self._animator:
+            self._animator.draw_ganesh_festival_overlay(surface)
+
+    def draw_holi_festival_overlay(self, surface) -> None:
+        if self._animator:
+            self._animator.draw_holi_festival_overlay(surface)
+
+    def draw_independence_festival_overlay(self, surface) -> None:
+        if self._animator:
+            self._animator.draw_independence_festival_overlay(surface)
+
+    def draw_procedural_eyes(self, surface) -> None:
+        if self._animator:
+            self._animator.draw_procedural_eyes(surface)
+
     def set_state(self, state: EyeState) -> None:
         if self._animator:
             self._animator.set_state(state)
@@ -1916,6 +2812,30 @@ class EyeAnimatorThread:
         if self._animator:
             self._animator.set_telemetry_data(cpu, ram, temp, battery, is_charging, is_alert)
 
+    def show_todo_overlay(self, tasks: list, timeout: float = 8.0) -> None:
+        """Triggers full-screen task table (replaces eyes). timeout = TTS duration + 3 s buffer."""
+        if self._animator:
+            self._animator.show_todo_overlay(tasks, timeout)
+
+    def show_reminders_overlay(self, reminders: list, timeout: float = 8.0) -> None:
+        """Triggers full-screen reminder list (replaces eyes)."""
+        if self._animator:
+            self._animator.show_reminders_overlay(reminders, timeout)
+
+    def show_reminder_overlay(self, title: str, due_time: str, timeout: float = 8.0) -> None:
+        """Legacy single-reminder shim — delegates to show_reminders_overlay."""
+        if self._animator:
+            self._animator.show_reminder_overlay(title, due_time, timeout)
+
+    def extend_overlay(self, extra_seconds: float) -> None:
+        """Extends active card overlay timeout without resetting elapsed."""
+        if self._animator:
+            self._animator.extend_overlay(extra_seconds)
+
+    def clear_overlay(self) -> None:
+        if self._animator:
+            self._animator.clear_overlay()
+
     def trigger_blink(self) -> None:
         if self._animator:
             self._animator.trigger_blink()
@@ -1926,6 +2846,7 @@ class EyeAnimatorThread:
     def start(self, wait_ready: bool = True, timeout: float = 5.0) -> bool:
         self._stop_evt.clear()
         self._ready_evt.clear()
+        set_active_display(self)
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="MorphixEyeDisplay"
         )

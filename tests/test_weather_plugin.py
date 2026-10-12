@@ -3,17 +3,17 @@ Morphix Desktop Companion Robot - Weather Plugin Test Suite
 ============================================================
 File: tests/test_weather_plugin.py
 Description:
-    Unit tests for WeatherService, WeatherIntentPlugin, and IntentClassifier integration.
+    Unit tests for WeatherService, WeatherIntentPlugin, extract_city, and IntentClassifier integration.
 """
 
 import unittest
 from unittest.mock import MagicMock, patch
 from src.intent.intent_classifier import IntentClassifier, IntentType
-from src.intent.weather_plugin import WeatherIntentPlugin, WeatherService
+from src.intent.weather_plugin import WeatherIntentPlugin, WeatherService, extract_city
 
 
 class TestWeatherPlugin(unittest.TestCase):
-    """Verifies location detection, weather fetching, WMO code mapping, and intent matching."""
+    """Verifies location detection, city extraction, weather fetching, WMO code mapping, and intent matching."""
 
     def setUp(self) -> None:
         self.weather_service = WeatherService()
@@ -53,6 +53,22 @@ class TestWeatherPlugin(unittest.TestCase):
         res = self.weather_service.format_speech_response(data, is_hindi=True)
         self.assertIn("Delhi", res)
         self.assertIn("28 degree Celsius", res)
+
+    def test_city_extraction(self) -> None:
+        city_queries = [
+            ("What is the weather in Delhi?", "Delhi"),
+            ("Nagpur ka weather kaisa hai?", "Nagpur"),
+            ("Weather of Mumbai", "Mumbai"),
+            ("Temperature for Bangalore", "Bangalore"),
+            ("How is the weather?", None),
+        ]
+        for q, expected in city_queries:
+            with self.subTest(q=q):
+                city = extract_city(q)
+                self.assertEqual(city, expected)
+                res = self.plugin.match(q)
+                self.assertIsNotNone(res)
+                self.assertEqual(res.parameters.get("city"), expected)
 
     def test_intent_matching_english(self) -> None:
         queries = [

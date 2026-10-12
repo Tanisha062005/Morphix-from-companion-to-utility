@@ -46,12 +46,17 @@ class TodoParser:
             r"^show\s+my\s+todos?$",
             r"^show\s+me\s+my\s+todos?$",
             r"^show\s+me\s+my\s+tasks$",
+            r"^show\s+me\s+my\s+todo\s+list$",
+            r"^show\s+to-?do\s+list$",
             r"^list\s+my\s+tasks$",
             r"^list\s+my\s+todos?$",
             r"^what\s+are\s+my\s+todos?$",
+            r"^what(?:'s| is)?\s+on\s+my\s+todos?(?:\s+list)?$",
+            r"^my\s+todos?\s+list$",
             r"^show\s+todos?$",
             r"^list\s+tasks$",
-            r"^show\s+tasks$"
+            r"^show\s+tasks$",
+            r"^read\s+my\s+todo$"
         ]
         for pattern in show_patterns:
             if re.search(pattern, text):
@@ -71,9 +76,11 @@ class TodoParser:
         if m_add:
             item = m_add.group(1).strip()
             # Clean off trailing location strings if caught inside the capture group
-            if item.endswith(" in my todo"):
-                item = item[:-11].strip()
-            elif item.endswith(" in my todo list"):
+            item = re.sub(
+                r"\s+(?:in|to|into|on)\s+(?:my\s+)?(?:todo|to-?do|tasks?)(?:\s+list)?$",
+                "", item, flags=re.IGNORECASE
+            ).strip()
+            if item.endswith(" in my todo list"):
                 item = item[:-16].strip()
             return {"intent": "ADD_TODO", "item": item}
 

@@ -36,6 +36,35 @@ if not logger.handlers:
     logger.propagate = False
 
 
+_last_stt_net_err_time: float = 0.0
+
+
+def _handle_stt_network_error(exc: Exception) -> None:
+    """Handles network/DNS errors gracefully without flooding terminal logs."""
+    global _last_stt_net_err_time
+    import time
+    now = time.time()
+    err_str = str(exc).lower()
+    is_net_err = isinstance(exc, (sr.RequestError, OSError, ConnectionError)) or any(
+        k in err_str for k in ["11001", "getaddrinfo", "nodename", "connection", "unreachable", "name or service not known", "timed out", "temporarily unavailable", "request error"]
+    )
+    if is_net_err:
+        try:
+            from src.display.eye_animator import get_active_display
+            disp = get_active_display()
+            if disp:
+                disp.set_overlay("NO_INTERNET", timeout=5.0)
+        except Exception:
+            pass
+        if now - _last_stt_net_err_time >= 5.0:
+            _last_stt_net_err_time = now
+            logger.warning("[Morphix] Network offline / DNS error during STT: %s", exc)
+    else:
+        if now - _last_stt_net_err_time >= 5.0:
+            _last_stt_net_err_time = now
+            logger.error("Google STT error: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # Google Speech Engine — implements the SpeechEngine ABC
 # ---------------------------------------------------------------------------
@@ -116,11 +145,8 @@ class GoogleSpeechEngine(SpeechEngine):
 
         except sr.UnknownValueError:
             return ""
-        except sr.RequestError as exc:
-            logger.error("Google STT RequestError: %s", exc)
-            return ""
         except Exception as exc:
-            logger.error("Google STT unexpected error: %s", exc)
+            _handle_stt_network_error(exc)
             return ""
 
     def _en_in_with_fallback(self, audio_data: sr.AudioData) -> str:
@@ -152,14 +178,15 @@ class GoogleSpeechEngine(SpeechEngine):
         except sr.UnknownValueError:
             # en-IN completely failed — try Hindi
             return self._hi_in_fallback(audio_data)
-        except sr.RequestError:
-            raise  # Let caller handle network errors
+        except Exception as exc:
+            _handle_stt_network_error(exc)
+            return ""
 
     def _hi_in_fallback(self, audio_data: sr.AudioData) -> str:
         """Secondary pass using hi-IN locale."""
         try:
             return self._recognizer.recognize_google(audio_data, language="hi-IN")
-        except (sr.UnknownValueError, sr.RequestError):
+        except (sr.UnknownValueError, sr.RequestError, Exception):
             return ""
 
 
